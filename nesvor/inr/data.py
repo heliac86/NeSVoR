@@ -64,6 +64,25 @@ class PointDataset(object):
         )
         return self.v[torch.logical_and(self.v > q1, self.v < q2)].mean().item()
 
+    # ===== [k_norm] 훈련 타겟 일괄 정규화 =====
+    # self.v와 self.slice_images를 v_mean으로 동시에 나누어
+    # MSE Loss와 FF Loss의 타겟 스케일을 일치시킴.
+    # 롤백 시이 메서드를 삭제하면 정규화가 해제됨.
+    def normalize(self, v_mean: float) -> None:
+        """v_mean으로 self.v 및 self.slice_images를 함께 나누어 정규화.
+
+        train.py에서 dataset.mean을 쪼은 뒤 한 번만 호출.
+        정규화 후 모델 출력은 ~1.0 단위이며,
+        sample.py에서 * model.v_mean 역정규화를 통해 원본 강도 범위로 복원됨.
+        """
+        if v_mean <= 0:
+            raise ValueError(f"v_mean must be positive, got {v_mean}")
+        self.v = self.v / v_mean
+        self.slice_images = [
+            img / v_mean for img in self.slice_images
+        ]
+    # ===== [k_norm 끝] =====
+
     def get_batch(self, batch_size: int, device) -> Dict[str, torch.Tensor]:
         if self.count + batch_size > self.xyz.shape[0]:  # new epoch, shuffle data
             self.count = 0
@@ -90,7 +109,7 @@ class PointDataset(object):
     ) -> Dict[str, torch.Tensor]:
         """FF Loss 계산을 위한 패치 배치 샘플링.
 
-        get_batch()는 픽셀을 랜덤으로 섞어 공간 구조가 파괴되지만,
+        get_batch()는 픽셀을 랜덤으로 섯어 공간 구조가 파괴되지만,
         이 메서드는 한 슬라이스에서 공간적으로 연속된 P×P 패치를 추출하므로
         FFT 적용 및 FF Loss 계산에 적합하다.
 
@@ -129,7 +148,7 @@ class PointDataset(object):
 
             H, W = img.shape
 
-            # 패치보다 작은 슬라이스는 건너뜃
+            # 패치보다 작은 슬라이스는 건너뜀
             if H < P or W < P:
                 continue
 
