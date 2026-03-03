@@ -43,6 +43,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         spatial_scaling,
         args,
     )
+
+    # ===== [k_norm] 훈련 타겟 정규화 =====
+    # dataset.mean은 NeSVoR() 생성자에서 delta 계산에 쓰이므로
+    # 반드시 NeSVoR 생성 이후에 호출해야 함.
+    v_mean = dataset.mean
+    logging.info("[k_norm] Training target normalization: v_mean = %.4f", v_mean)
+    dataset.normalize(v_mean)          # self.v 및 slice_images를 v_mean으로 나눔
+    model.inr.v_mean.fill_(v_mean)     # 추론 시 역정규화에 쓰일 인자를 INR 버퍼에 저장
+    # ===== [k_norm 끝] =====
+
     # setup optimizer
     params_net = []
     params_encoding = []
@@ -113,7 +123,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     train_time = 0.0
     for i in range(1, args.n_iter + 1):
         train_step_start = time.time()
-        # 가중치 관찰용
+        # 가중치 관산용
         if i % 500 == 0:
             print("Learned Hash Grid Weights:", model.inr.level_weights.data)
         # forward
