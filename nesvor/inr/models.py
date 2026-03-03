@@ -154,6 +154,13 @@ class INR(nn.Module):
         # 가중치를 1.0으로 초기화 (원래의 해시 그리드 값을 그대로 통과시키는 상태에서 시작)
         self.level_weights = nn.Parameter(torch.ones(self.n_levels))
 
+        # ===== [k_norm] 역정규화 스케일 인자 =====
+        # train.py에서 훈련 직전 dataset.mean 값으로 덮어씀.
+        # 1.0으로 초기화하면 정규화를 적용하지 않은 기존 동작과 동일하게 작동함
+        # (호환성 유지 및 롤백 시 이 두 줄 삭제)
+        self.register_buffer("v_mean", torch.tensor(1.0, dtype=torch.float32))
+        # ===== [k_norm 끝] =====
+
         self.encoding = build_encoding(
             n_input_dims=3,
             otype="HashGrid",
