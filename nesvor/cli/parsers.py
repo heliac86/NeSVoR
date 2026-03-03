@@ -187,6 +187,49 @@ def build_parser_training() -> argparse.ArgumentParser:
         type=float,
         help="Weight of deformation regularization ",
     )
+    # ===== [FF Loss 추가] Focal Frequency Loss 관련 인자 =====
+    parser.add_argument(
+        "--weight-ff-loss",
+        default=0.0,
+        type=float,
+        help=(
+            "Weight of Focal Frequency Loss (FF Loss). "
+            "FF Loss is computed on patch-wise FFT maps and penalizes "
+            "hard-to-reconstruct frequency components. "
+            "Set to 0 (default) to disable FF Loss entirely."
+        ),
+    )
+    parser.add_argument(
+        "--patch-size",
+        default=16,
+        type=int,
+        help=(
+            "Patch size (P) used for FF Loss computation. "
+            "Each patch is a spatially contiguous P\u00d7P region sampled from a single slice. "
+            "Ignored when --weight-ff-loss is 0."
+        ),
+    )
+    parser.add_argument(
+        "--n-patches",
+        default=8,
+        type=int,
+        help=(
+            "Number of patches sampled per training iteration for FF Loss. "
+            "Increasing this value improves frequency coverage but raises memory usage. "
+            "Ignored when --weight-ff-loss is 0."
+        ),
+    )
+    parser.add_argument(
+        "--ff-alpha",
+        default=1.0,
+        type=float,
+        help=(
+            "Exponent alpha for the dynamic frequency weighting in FF Loss. "
+            "Higher values place more emphasis on hard (high-error) frequency components. "
+            "Recommended range: 0.5 ~ 2.0. Ignored when --weight-ff-loss is 0."
+        ),
+    )
+    # ===== [FF Loss 추가 끝] =====
 
     # training
     parser = _parser.add_argument_group("training")
