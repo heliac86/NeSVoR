@@ -6,7 +6,9 @@ import torch
 import torch.optim as optim
 import logging
 from ..utils import MovingAverage, log_params, TrainLogger
-from .models import INR, NeSVoR, D_LOSS, S_LOSS, DS_LOSS, I_REG, B_REG, T_REG, D_REG
+# ===== [FF Loss 추가] 모델 임포트에 FF_LOSS 키 추가 =====
+from .models import INR, NeSVoR, D_LOSS, S_LOSS, DS_LOSS, I_REG, B_REG, T_REG, D_REG, FF_LOSS
+# ===== [FF Loss 추가 끝] =====
 from ..transform import RigidTransform
 from ..image import Volume, Slice
 from .data import PointDataset
@@ -86,7 +88,24 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         B_REG: args.weight_bias,
         I_REG: args.weight_image,
         D_REG: args.weight_deform,
+        # ===== [FF Loss 추가] loss_weights 딕셔너리에 FF_LOSS 가중치 등록 =====
+        # args에 weight_ff_loss가 없으면 0.0으로 간주 (parsers.py 추가 전 호환성)
+        FF_LOSS: getattr(args, "weight_ff_loss", 0.0),
+        # ===== [FF Loss 추가 끝] =====
     }
+
+    # ===== [FF Loss 추가] FF Loss 활성화 여부 및 패치 샘플링 하이퍼파라미터 설정 =====
+    # model.ff_loss_fn이 초기화된 경우(weight_ff_loss > 0)에만 패치 샘플링 수행
+    use_ff_loss = model.ff_loss_fn is not None
+    patch_size = getattr(args, "patch_size", 16)   # 패치 한 변 크기 (P×P)
+    n_patches  = getattr(args, "n_patches",  8)    # iteration당 샘플링할 패치 수
+    if use_ff_loss:
+        logging.info(
+            "FF Loss enabled: weight=%.4f, patch_size=%d, n_patches=%d",
+            loss_weights[FF_LOSS], patch_size, n_patches,
+        )
+    # ===== [FF Loss 추가 끝] =====
+
     average = MovingAverage(1 - 0.001)
     # logging
     logging_header = False
@@ -101,6 +120,19 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         batch = dataset.get_batch(args.batch_size, args.device)
         with torch.cuda.amp.autocast(fp16):
             losses = model(**batch)
+
+            # ===== [FF Loss 추가] 패치 배치 샘플링 및 patch_forward 호출 =====
+            # 픽셀 단위 MSE Loss와 동일한 backward()에서 함께 계산됨
+            if use_ff_loss:
+                patch_batch = dataset.get_patch_batch(
+                    n_patches, patch_size, args.device
+                )
+                # 유효한 패치가 하나라도 있을 때만 FF Loss 추가
+                if patch_batch:
+                    patch_losses = model.patch_forward(**patch_batch)
+                    losses.update(patch_losses)  # FF_LOSS 키를 losses에 합치
+            # ===== [FF Loss 추가 끝] =====
+
             loss = 0
             for k in losses:
                 if k in loss_weights and loss_weights[k]:
