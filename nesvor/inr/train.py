@@ -45,12 +45,19 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     )
 
     # ===== [k_norm] 훈련 타겟 정규화 =====
-    # dataset.mean은 NeSVoR() 생성자에서 delta 계산에 쓰이므로
-    # 반드시 NeSVoR 생성 이후에 호출해야 함.
+    # 주의: NeSVoR() 생성자 내부에서 dataset.mean으로 model.delta가 설정되므로
+    # 반드시 NeSVoR 생성 이훈에 호출해야 함.
     v_mean = dataset.mean
     logging.info("[k_norm] Training target normalization: v_mean = %.4f", v_mean)
     dataset.normalize(v_mean)          # self.v 및 slice_images를 v_mean으로 나눔
-    model.inr.v_mean.fill_(v_mean)     # 추론 시 역정규화에 쓰일 인자를 INR 버퍼에 저장
+    model.inr.v_mean.fill_(v_mean)     # 추론 시 역정규화에 쓸 인자를 INR 버퍼에 저장
+    # model.delta는 NeSVoR 생성 시 args.delta * v_mean으로 설정되었음.
+    # 정규화 훈 density 값이 ~1.0 수준이 되므로
+    # delta도 v_mean으로 나누어 정규화된 공간에서의 임계값으로 복원해야 함.
+    # (img_reg의 edge 모드: delta를 grad 임계값으로 사용하므로
+    #  delta가 너무 크면 regularization이 사실상 비활성화됨)
+    model.delta = model.delta / v_mean
+    logging.info("[k_norm] model.delta rescaled to %.6f", model.delta)
     # ===== [k_norm 끝] =====
 
     # setup optimizer
