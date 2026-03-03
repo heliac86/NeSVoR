@@ -76,6 +76,11 @@ def sample_points(
             )
             v_b = model(xyz_batch).mean(-1)
             v[i : i + batch_size] = v_b
+    # [k_norm] INR 출력은 정규화된 단위(약 1.0 수준)이므로
+    # v_mean을 곱해 원본 BraTS 강도 범위로 복원함.
+    # 롤백 시 이 두 줄 삭제 (v_mean 버퍼가 1.0으로 초기화되어 있으므로
+    # 삭제해도 기존 동작 유지)
+    v = v * model.v_mean.item()
     return v.view(shape)
 
 
@@ -99,6 +104,8 @@ def sample_slice(
             0 if output_psf_factor <= 0 else n_samples,
         )
         v = model(xyz_masked).mean(-1)
+        # [k_norm] 슬라이스 샘플링 시에도 동일한 역정규화 적용
+        v = v * model.v_mean.item()
         slice_sampled.mask = m.view(slice_sampled.mask.shape)
         slice_sampled.image[slice_sampled.mask] = v.to(slice_sampled.image.dtype)
     return slice_sampled
