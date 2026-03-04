@@ -474,7 +474,9 @@ class NeSVoR(nn.Module):
         if not self.args.no_pixel_variance:
             # var = (bias_detach * psf * var).mean(-1)
             var = (bias_detach * var).mean(-1)
-            var = c.detach() * var
+            # bugfix: --no-slice-scale 시 c=1(int)이므로 tensor 여부를 확인한 뒤 detach
+            c_detach = c.detach() if isinstance(c, torch.Tensor) else c
+            var = c_detach * var
             var = var**2
         if not self.args.no_slice_variance:
             var = var + self.log_var_slice.exp()[slice_idx]
@@ -504,60 +506,29 @@ class NeSVoR(nn.Module):
         slice_idx_patch: torch.Tensor,
         valid_mask_patch: torch.Tensor,
     ) -> Dict[str, Any]:
-        """FF Loss 계산을 위한 패치 단위 순전파.
-
-        data.py의 get_patch_batch()이 반환한 배치를 바로 받아 사용한다.
-        기존 forward()와의 차이점:
-          - xyz_patch: (n, P*P, 3) 패치당 P*P개 픽셀의 좌표를 모두 포함
-          - slice_idx_patch: (n,) 픽셀 단위가 아닌 패치 단위 인덱스
-          - 반환값이 {FF_LOSS: scalar}만 존재 (MSE Loss 없음)
-
-        내부 좌승 시쿠엜스:
-          1. (n, P*P, 3) → (n*P*P, 3): 픽셀 단위 flatten
-          2. PSF 샘플링 및 rigid 변환 (forward()와 동일한 방식)
-          3. INR 순전파 → 예측 강도 (n*P*P,)
-          4. (n*P*P,) → (n, P, P): 패치 형태로 복구
-          5. FocalFrequencyLoss 계산
-
-        Args:
-            xyz_patch:        (n, P*P, 3) untransformed 3D 좌표
-            v_patch:          (n, P, P) GT 픽셀 강도값
-            slice_idx_patch:  (n,) 슬라이스 인덱스
-            valid_mask_patch: (n, P, P) 유효 픽셀 bool 마스크
-
-        Returns:
-            Dict: {FF_LOSS: scalar tensor}
-        """
         n = xyz_patch.shape[0]
         PP = xyz_patch.shape[1]   # P*P
         P = int(PP ** 0.5)
 
-        # (n, P*P, 3) -> (n*P*P, 3): 픽셀 단위로 flatten
         xyz_flat = xyz_patch.view(n * PP, 3)
-
-        # slice_idx: 패치 단위 (n,) -> 픽셀 단위 (n*P*P,)
-        # 같은 패치의 모든 픽셀은 동일한 슬라이스에서 유래
         slice_idx_flat = slice_idx_patch.repeat_interleave(PP)  # (n*P*P,)
 
-        # PSF 샘플링 및 rigid 변환 (forward()와 동일한 방식)
         n_samples = self.args.n_samples
         xyz_psf = torch.randn(
             n * PP, n_samples, 3, dtype=xyz_flat.dtype, device=xyz_flat.device
         )
-        psf_sigma = self.psf_sigma[slice_idx_flat][:, None]   # (n*P*P, 1, 3)
-        t = self.axisangle[slice_idx_flat][:, None]            # (n*P*P, 1, 6)
+        psf_sigma = self.psf_sigma[slice_idx_flat][:, None]
+        t = self.axisangle[slice_idx_flat][:, None]
         xyz_t = ax_transform_points(
             t, xyz_flat[:, None] + xyz_psf * psf_sigma, self.trans_first
-        )  # (n*P*P, n_samples, 3)
+        )
 
-        # 변형 보정 (deformable 모드)
         if self.args.deformable:
             de = self.deform_embedding(slice_idx_flat)[:, None].expand(
                 -1, n_samples, -1
             )
             xyz_t = self.deform_net(xyz_t, de)
 
-        # 슬라이스 임베딩
         if self.args.n_features_slice:
             se = self.slice_embedding(slice_idx_flat)[:, None].expand(
                 -1, n_samples, -1
@@ -565,36 +536,27 @@ class NeSVoR(nn.Module):
         else:
             se = None
 
-        # INR 순전파
         results = self.net_forward(xyz_t, se)
-        density = results["density"]   # (n*P*P, n_samples)
+        density = results["density"]
 
-        # Bias 적용
         if "log_bias" in results:
             bias = results["log_bias"].exp()
         else:
             bias = 1
 
-        # 슬라이스 스케일 적용
         if not self.args.no_slice_scale:
             c: Any = F.softmax(self.logit_coef, 0)[slice_idx_flat] * self.n_slices
         else:
             c = 1
 
-        # PSF 적분 -> 픽셀 강도 예측: (n*P*P,)
         v_pred = (bias * density).mean(-1)
         v_pred = c * v_pred
-
-        # (n*P*P,) -> (n, P, P): 패치 형태로 복구
         v_pred_patch = v_pred.view(n, P, P)
 
-        # 유효 마스크 적용: 마스크 밖 픽셀는 GT와 예측 모두 0으로 처리
-        # -> FFT 시 해당 영역의 주파수 기여를 제거
         mask_float = valid_mask_patch.float()
         v_pred_patch = v_pred_patch * mask_float
         v_gt_patch   = v_patch * mask_float
 
-        # FocalFrequencyLoss 계산
         ff_loss = self.ff_loss_fn(v_pred_patch, v_gt_patch)
 
         return {FF_LOSS: ff_loss}
