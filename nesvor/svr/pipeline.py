@@ -29,14 +29,15 @@ def _initial_mask(
     if sample_mask is not None:
         mask = load_mask(sample_mask, device)
         # ===== [Shape Mismatch Fix] =====
-        # When output_full_fov is True, set all mask voxels to True before
-        # resample() so that xyz_masked returns the full grid coordinates.
-        # This makes the output FOV equal to the full volume FOV instead of
-        # being cropped to the bounding box of the masked brain region.
-        # After resample(), mask.mask is restored from mask.image > 0 as
-        # usual, so the brain mask is preserved for reconstruction.
+        # Volume.resample() hardcodes ±10-voxel padding around the bounding box
+        # (xyz_min = xyz.amin(0) - resolution_new * 10). Calling resample() after
+        # setting mask.mask to all-True produced 259x259x174 instead of the
+        # expected 240x240x155. Solution: skip resample() entirely and use the
+        # GT volume grid as-is. Set mask.mask to all-True so reconstruction
+        # covers the full FOV; background voxels will remain 0.
         if output_full_fov:
             mask.mask = torch.ones_like(mask.image, dtype=torch.bool)
+            return mask, False
         # ===== [Shape Mismatch Fix 끝] =====
     transformation = None
     if sample_orientation is not None:

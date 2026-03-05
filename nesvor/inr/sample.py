@@ -21,6 +21,19 @@ def override_sample_mask(
             mask = load_mask(new_mask, device=mask.device)
         else:
             raise TypeError("unknwon type for mask")
+        # ===== [Shape Mismatch Fix] =====
+        # Volume.resample() hardcodes ±10-voxel padding around the bounding box
+        # (xyz_min = xyz.amin(0) - resolution_new * 10). This made the previous
+        # attempt produce 259x259x174 instead of the expected 240x240x155.
+        # Solution: when output_full_fov is requested, skip resample() entirely
+        # and use the GT volume grid as-is (it is already at the desired
+        # resolution). Set mask.mask to all-True so that sample_volume() writes
+        # INR values to every voxel; background voxels will stay 0 because the
+        # INR has no signal outside the brain region.
+        if output_full_fov:
+            mask.mask = torch.ones_like(mask.image, dtype=torch.bool)
+            return mask
+        # ===== [Shape Mismatch Fix 끝] =====
     transformation = None
     if new_orientation is not None:
         if isinstance(new_orientation, Volume):
@@ -33,20 +46,7 @@ def override_sample_mask(
                 device=mask.device,
             ).transformation
     if transformation or new_resolution:
-        # ===== [Shape Mismatch Fix] =====
-        # When output_full_fov is True and an external sample-mask was given,
-        # temporarily expand mask.mask to all-True so that resample() uses
-        # the full volume grid (not just the brain bounding box) to determine
-        # the output FOV.  After resample(), restore mask.mask from the
-        # resampled image so sample_volume() still only fills brain voxels.
-        if output_full_fov and new_mask is not None:
-            mask.mask = torch.ones_like(mask.image, dtype=torch.bool)
-        # ===== [Shape Mismatch Fix 끝] =====
         mask = mask.resample(new_resolution, transformation)
-        # ===== [Shape Mismatch Fix] =====
-        if output_full_fov and new_mask is not None:
-            mask.mask = mask.image > 0
-        # ===== [Shape Mismatch Fix 끝] =====
     return mask
 
 
