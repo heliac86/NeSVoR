@@ -469,6 +469,9 @@ def _sample_inr(
         getattr(args, "sample_mask", None),
         getattr(args, "output_resolution", None),
         getattr(args, "sample_orientation", None),
+        # ===== [Shape Mismatch Fix] =====
+        output_full_fov=getattr(args, "output_full_fov", False),
+        # ===== [Shape Mismatch Fix 끝] =====
     )
 
     output_volume = (
