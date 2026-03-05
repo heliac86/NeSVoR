@@ -12,6 +12,7 @@ def override_sample_mask(
     new_mask: Union[PathType, None, Volume] = None,
     new_resolution: Optional[float] = None,
     new_orientation: Union[PathType, None, Volume, RigidTransform] = None,
+    output_full_fov: bool = False,
 ) -> Volume:
     if new_mask is not None:
         if isinstance(new_mask, Volume):
@@ -32,7 +33,20 @@ def override_sample_mask(
                 device=mask.device,
             ).transformation
     if transformation or new_resolution:
+        # ===== [Shape Mismatch Fix] =====
+        # When output_full_fov is True and an external sample-mask was given,
+        # temporarily expand mask.mask to all-True so that resample() uses
+        # the full volume grid (not just the brain bounding box) to determine
+        # the output FOV.  After resample(), restore mask.mask from the
+        # resampled image so sample_volume() still only fills brain voxels.
+        if output_full_fov and new_mask is not None:
+            mask.mask = torch.ones_like(mask.image, dtype=torch.bool)
+        # ===== [Shape Mismatch Fix 끝] =====
         mask = mask.resample(new_resolution, transformation)
+        # ===== [Shape Mismatch Fix] =====
+        if output_full_fov and new_mask is not None:
+            mask.mask = mask.image > 0
+        # ===== [Shape Mismatch Fix 끝] =====
     return mask
 
 
@@ -76,10 +90,9 @@ def sample_points(
             )
             v_b = model(xyz_batch).mean(-1)
             v[i : i + batch_size] = v_b
-    # [k_norm] INR 출력은 정규화된 단위(약 1.0 수준)이므로
+    # [k_norm] INR 출력은 정규화된 단위(약 1.0 수준)이명로
     # v_mean을 곱해 원본 BraTS 강도 범위로 복원함.
-    # 롤백 시 이 두 줄 삭제 (v_mean 버퍼가 1.0으로 초기화되어 있으므로
-    # 삭제해도 기존 동작 유지)
+    # 롤백 시 이 두 줄 삭제 (이 두 줄 삭제해도 기존 동작 유지)
     v = v * model.v_mean.item()
     return v.view(shape)
 
