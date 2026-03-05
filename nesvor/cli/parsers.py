@@ -151,7 +151,7 @@ def build_parser_training() -> argparse.ArgumentParser:
         help=rst(
             "Type of image regularization. \n\n"
             "1. ``TV``: total variation (L1 regularization of image gradient); \n"
-            "2. ``edge``: edge-preserving regularization, see `--delta <#delta>`__\ . \n"
+            "2. ``edge``: edge-preserving regularization, see `--delta <#delta>`__\\ . \n"
             "3. ``L2``: L2 regularization of image gradient; \n"
             "4. ``none``: no image regularization. \n\n"
         ),
@@ -168,7 +168,7 @@ def build_parser_training() -> argparse.ArgumentParser:
         default=0.2,
         help=rst(
             "Parameter to define intensity of an edge in edge-preserving regularization. "
-            "See `--image-regularization <#image-regularization>`__\ ."
+            "See `--image-regularization <#image-regularization>`__\\ ."
             "The edge-preserving regularization becomes L1 when ``delta`` goes to 0."
         ),
     )
@@ -523,6 +523,22 @@ def build_parser_outputs_sampling(
             type=str,
             help="3D Mask for sampling INR. If not provided, will use a mask esitmated from the input data.",
         )
+        # ===== [Shape Mismatch Fix] Full FOV output flag =====
+        parser.add_argument(
+            "--output-full-fov",
+            action="store_true",
+            help=(
+                "Use the full FOV of the --sample-mask volume as the output FOV. "
+                "By default, the output FOV is cropped to the bounding box of the "
+                "masked brain region (e.g. ~148x181x154 for BraTS20). "
+                "When this flag is set, the output shape matches the full extent of "
+                "the --sample-mask volume (e.g. 240x240x155 for BraTS20), enabling "
+                "direct voxel-wise comparison with the ground-truth volume. "
+                "Requires --sample-mask to be specified. "
+                "Default: False (original bounding-box behaviour is preserved)."
+            ),
+        )
+        # ===== [Shape Mismatch Fix 끝] =====
     update_defaults(_parser, **kwargs)
     return _parser
 
