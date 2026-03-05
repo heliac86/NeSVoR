@@ -22,11 +22,22 @@ def _initial_mask(
     sample_mask: Optional[PathType],
     sample_orientation: Optional[PathType],
     device: DeviceType,
+    output_full_fov: bool = False,
 ) -> Tuple[Volume, bool]:
     dataset = PointDataset(slices)
     mask = dataset.mask
     if sample_mask is not None:
         mask = load_mask(sample_mask, device)
+        # ===== [Shape Mismatch Fix] =====
+        # When output_full_fov is True, set all mask voxels to True before
+        # resample() so that xyz_masked returns the full grid coordinates.
+        # This makes the output FOV equal to the full volume FOV instead of
+        # being cropped to the bounding box of the masked brain region.
+        # After resample(), mask.mask is restored from mask.image > 0 as
+        # usual, so the brain mask is preserved for reconstruction.
+        if output_full_fov:
+            mask.mask = torch.ones_like(mask.image, dtype=torch.bool)
+        # ===== [Shape Mismatch Fix 끝] =====
     transformation = None
     if sample_orientation is not None:
         transformation = load_volume(
@@ -87,6 +98,7 @@ def slice_to_volume_reconstruction(
     no_local_exclusion: bool = False,
     sample_mask: Optional[PathType] = None,
     sample_orientation: Optional[PathType] = None,
+    output_full_fov: bool = False,
     psf: str = "gaussian",
     device: DeviceType = torch.device("cpu"),
     **unused
@@ -103,6 +115,7 @@ def slice_to_volume_reconstruction(
         sample_mask,
         sample_orientation,
         device,
+        output_full_fov=output_full_fov,
     )
 
     # data normalization
