@@ -110,7 +110,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         FF_LOSS: getattr(args, "weight_ff_loss", 0.0),
         # ===== [FF Loss 추가 끝] =====
         # ===== [추가] 레벨 페널티 가중치 =====
-        "levelReg": 0.05, # 초기값으로 0.05 정도를 추천합니다. 상황에 따라 파라미터로 빼셔도 좋습니다.
+        "levelReg": 0.01, # 초기값으로 0.05 정도를 추천합니다. 상황에 따라 파라미터로 빼셔도 좋습니다.
         # ===== [추가 끝] =====
     }
 
