@@ -434,7 +434,8 @@ class NeSVoR(nn.Module):
         if not self.args.no_pixel_variance:
             # var = (bias_detach * psf * var).mean(-1)
             var = (bias_detach * var).mean(-1)
-            var = c.detach() * var
+            # var = c.detach() * var
+            var = (c.detach() if hasattr(c, 'detach') else c) * var
             var = var**2
         if not self.args.no_slice_variance:
             var = var + self.log_var_slice.exp()[slice_idx]
