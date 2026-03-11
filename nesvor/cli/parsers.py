@@ -200,6 +200,15 @@ def build_parser_training() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--ff-mask-ratio",
+        default=1.0,
+        type=float,
+        help=(
+            "Ratio of frequency spectrum to keep for FF Loss (0.0~1.0). "
+            "1.0 means all frequencies are used. Lower values (e.g., 0.5) mask out high-frequency noise."
+        ),
+    )
+    parser.add_argument(
         "--patch-size",
         default=16,
         type=int,

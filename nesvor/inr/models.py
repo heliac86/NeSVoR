@@ -410,6 +410,8 @@ class NeSVoR(nn.Module):
         if getattr(self.args, "weight_ff_loss", 0.0) > 0:
             self.ff_loss_fn = FocalFrequencyLoss(
                 alpha=getattr(self.args, "ff_alpha", 1.0),
+                patch_factor=1,
+                freq_mask_ratio=getattr(self.args, "ff_mask_ratio", 1.0)
             )
         else:
             self.ff_loss_fn = None
