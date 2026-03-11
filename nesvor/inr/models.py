@@ -484,6 +484,18 @@ class NeSVoR(nn.Module):
             var = var + self.log_var_slice.exp()[slice_idx]
         # losses
         losses = {D_LOSS: ((v_out - v) ** 2 / (2 * var)).mean()}
+
+        # ===== [추가] Hash Grid Gating (Level Weights) 페널티 =====
+        # 레벨이 높아질수록(고주파수일수록) 가중치에 기하급수적으로 큰 페널티를 부여
+        if hasattr(self.inr, 'level_weights'):
+            n_levels = self.inr.n_levels
+            # 예: [1, 2, 4, 8, 16, ...] 형태로 고주파 레벨일수록 가중치 패널티 계수 증가
+            penalty_factors = torch.tensor([1.5 ** i for i in range(n_levels)], device=self.args.device)
+            # 페널티: (가중치의 제곱 * 페널티 계수)의 평균
+            level_reg_loss = ( (self.inr.level_weights ** 2) * penalty_factors ).mean()
+            losses["levelReg"] = level_reg_loss
+        # ===== [추가 끝] =====
+
         if not (self.args.no_pixel_variance and self.args.no_slice_variance):
             losses[S_LOSS] = 0.5 * var.log().mean()
             losses[DS_LOSS] = losses[D_LOSS] + losses[S_LOSS]
