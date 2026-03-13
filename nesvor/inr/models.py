@@ -201,7 +201,7 @@ class INR(nn.Module):
             self.bounding_box[1, 2],
         )
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, use_high_freq: bool = True): # 파라미터 추가
         x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
@@ -214,10 +214,19 @@ class INR(nn.Module):
         # 1. pe의 형태를 (N, L * F)에서 (N, L, F)로 변환
         #    N: 배치 크기, L: n_levels, F: n_features_per_level
         pe = pe.view(-1, self.n_levels, self.n_features_per_level)
+
+        # ===== [추가] 아키텍처 주파수 분리 =====
+        if not use_high_freq:
+            # MSE 계산 시에는 고주파(Level 6~11)를 꺼서 뼈대만 학습하게 함
+            mask = torch.ones_like(pe)
+            mask[:, 6:, :] = 0.0
+            pe = pe * mask
+        elif hasattr(self, 'level_weights'):
+            # 2. 가중치 곱하기 (Broadcasting 적용)
+            #    self.level_weights의 형태를 (1, L, 1)로 맞추어 각 레벨의 feature에 가중치가 곱해지도록 함
+            pe = pe * self.level_weights.view(1, self.n_levels, 1)
         
-        # 2. 가중치 곱하기 (Broadcasting 적용)
-        #    self.level_weights의 형태를 (1, L, 1)로 맞추어 각 레벨의 feature에 가중치가 곱해지도록 함
-        pe = pe * self.level_weights.view(1, self.n_levels, 1)
+        
         
         # 3. 다시 원래 형태 (N, L * F)로 복구하여 MLP(density_net)에 들어갈 수 있게 함
         pe = pe.view(-1, self.n_levels * self.n_features_per_level)
@@ -411,7 +420,8 @@ class NeSVoR(nn.Module):
             self.ff_loss_fn = FocalFrequencyLoss(
                 alpha=getattr(self.args, "ff_alpha", 1.0),
                 patch_factor=1,
-                freq_mask_ratio=getattr(self.args, "ff_mask_ratio", 1.0)
+                freq_mask_ratio=getattr(self.args, "ff_mask_ratio", 1.0),
+                hpf_ratio=getattr(self.args, "ff_hpf_ratio", 0.25)
             )
             # [새로 추가된 부분] 템플릿 로드
             prior_path = getattr(self.args, "ff_prior_template", "")
@@ -464,7 +474,7 @@ class NeSVoR(nn.Module):
         else:
             se = None
         # forward
-        results = self.net_forward(xyz, se)
+        results = self.net_forward(xyz, se, use_high_freq=False) # False로 변경!
         # output
         density = results["density"]
         if "log_bias" in results:
@@ -572,7 +582,7 @@ class NeSVoR(nn.Module):
         else:
             se = None
 
-        results = self.net_forward(xyz_t, se)
+        results = self.net_forward(xyz_t, se, use_high_freq=True) # True로 명시
         density = results["density"]
 
         if "log_bias" in results:
@@ -620,8 +630,9 @@ class NeSVoR(nn.Module):
         self,
         x: torch.Tensor,
         se: Optional[torch.Tensor] = None,
+        use_high_freq: bool = True,
     ) -> Dict[str, Any]:
-        density, pe, z = self.inr(x)
+        density, pe, z = self.inr(x, use_high_freq=use_high_freq)
         prefix_shape = density.shape
         results = {"density": density}
 

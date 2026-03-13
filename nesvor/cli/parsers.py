@@ -209,6 +209,12 @@ def build_parser_training() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--ff-hpf-ratio",
+        default=0.25,
+        type=float,
+        help="Ratio for High-Pass Filter in FF Loss. Ignores low frequencies to protect macro structure.",
+    )
+    parser.add_argument(
         "--patch-size",
         default=16,
         type=int,

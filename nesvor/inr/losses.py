@@ -43,6 +43,7 @@ class FocalFrequencyLoss(nn.Module):
         ave_spectrum: bool = False,
         log_matrix: bool = False,
         freq_mask_ratio: float = 1.0,
+        hpf_ratio: float = 0.25,
     ) -> None:
         super().__init__()
         self.alpha = alpha
@@ -50,6 +51,7 @@ class FocalFrequencyLoss(nn.Module):
         self.ave_spectrum = ave_spectrum
         self.log_matrix = log_matrix
         self.freq_mask_ratio = freq_mask_ratio
+        self.hpf_ratio = hpf_ratio
 
     def tensor2freq(self, x: torch.Tensor) -> torch.Tensor:
         """2D FFT 변환 후 실수/허수 파트를 마지막 차원으로 stack.
@@ -147,16 +149,28 @@ class FocalFrequencyLoss(nn.Module):
             gt_freq = self.tensor2freq(gt)
             sq_diff = (pred_freq - gt_freq).pow(2).sum(dim=-1)
 
-        # ===== [마스킹 로직] =====
-        if self.freq_mask_ratio < 1.0:
+        # ===== [수정된 마스킹 로직 (LPF + HPF)] =====
+        if self.freq_mask_ratio < 1.0 or self.hpf_ratio > 0.0:
             cy, cx = H // 2, W // 2
             y = torch.arange(H, device=sq_diff.device).view(-1, 1) - cy
             x = torch.arange(W, device=sq_diff.device).view(1, -1) - cx
             r = torch.sqrt(y**2 + x**2)
             max_r = torch.sqrt(torch.tensor(cy**2 + cx**2, dtype=torch.float32, device=sq_diff.device))
-            mask_radius = max_r * self.freq_mask_ratio
-            mask = (r <= mask_radius).float().view(1, H, W)
+            
+            mask = torch.ones((1, H, W), device=sq_diff.device)
+            
+            # Low-Pass: 초고주파 노이즈 차단 (기존)
+            if self.freq_mask_ratio < 1.0:
+                lp_mask = (r <= max_r * self.freq_mask_ratio).float()
+                mask = mask * lp_mask.view(1, H, W)
+                
+            # High-Pass: 저주파 구조 보호 (추가됨!)
+            if self.hpf_ratio > 0.0:
+                hp_mask = (r >= max_r * self.hpf_ratio).float()
+                mask = mask * hp_mask.view(1, H, W)
+                
             sq_diff = sq_diff * mask
+        # ===== [마스킹 로직 끝] =====
 
         # 동적 가중치 (Hard frequency 강조)
         weight = sq_diff.detach().pow(self.alpha / 2.0)

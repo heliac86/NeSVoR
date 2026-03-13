@@ -133,7 +133,18 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     train_time = 0.0
     for i in range(1, args.n_iter + 1):
         train_step_start = time.time()
-        # 가중치 관산용
+        # ===== [추가] 커리큘럼 학습: FF Loss 비중 서서히 올리기 =====
+        progress = i / args.n_iter
+        target_ff_weight = getattr(args, "weight_ff_loss", 0.0)
+        
+        if progress < 0.2:
+            # 초기 20%는 디노이징 이미지(MSE)로 뼈대만 잡음
+            current_ff_weight = 0.0
+        else:
+            # 20% ~ 50% 구간 동안 가중치를 서서히 100%까지 올림 (Fade-in)
+            current_ff_weight = target_ff_weight * min(1.0, (progress - 0.2) / 0.3)
+        # ============================================================
+        # 가중치 표시용
         if i % 500 == 0:
             print("Learned Hash Grid Weights:", model.inr.level_weights.data)
         # forward
@@ -155,8 +166,10 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
             loss = 0
             for k in losses:
-                if k in loss_weights and loss_weights[k]:
-                    loss = loss + loss_weights[k] * losses[k]
+                # [수정] FF_LOSS일 경우 가변 가중치(current_ff_weight) 적용
+                w = current_ff_weight if k == FF_LOSS else loss_weights.get(k, 0.0)
+                if w:
+                    loss = loss + w * losses[k]
         # backward
         scaler.scale(loss).backward()
         if args.debug:  # check nan grad
