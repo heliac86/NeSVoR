@@ -238,6 +238,16 @@ def build_parser_training() -> argparse.ArgumentParser:
             "Recommended range: 0.5 ~ 2.0. Ignored when --weight-ff-loss is 0."
         ),
     )
+    parser.add_argument(
+        "--ff-prior-template",
+        default="",
+        type=str,
+        help=(
+            "Path to the dataset-level frequency prior template (.npy). "
+            "If provided, FF Loss will compare predictions to this template "
+            "instead of the GT patches."
+        ),
+    )
     # ===== [FF Loss 추가 끝] =====
 
     # training

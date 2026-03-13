@@ -117,56 +117,49 @@ class FocalFrequencyLoss(nn.Module):
     def forward(
         self,
         pred: torch.Tensor,
-        gt: torch.Tensor,
+        gt: torch.Tensor = None,
+        prior_template: torch.Tensor = None,
     ) -> torch.Tensor:
-        """FF Loss 순전파.
-
-        Args:
-            pred: (B, H, W) 또는 (B, 1, H, W) 형태의 예측 패치.
-            gt:   (B, H, W) 또는 (B, 1, H, W) 형태의 정답 패치.
-
-        Returns:
-            scalar FF Loss 값.
-        """
-        # 채널 차원 제거: (B, 1, H, W) → (B, H, W)
         if pred.dim() == 4:
             pred = pred.squeeze(1)
-        if gt.dim() == 4:
+        if gt is not None and gt.dim() == 4:
             gt = gt.squeeze(1)
 
         B, H, W = pred.shape
 
-        # patch_factor > 1이면 패치를 더 작은 서브패치로 분할
-        if self.patch_factor > 1:
-            assert H % self.patch_factor == 0 and W % self.patch_factor == 0, (
-                f"패치 크기 ({H}, {W})가 patch_factor={self.patch_factor}로 나누어져야 합니다."
-            )
-            ph = H // self.patch_factor
-            pw = W // self.patch_factor
-            # (B, H, W) → (B * patch_factor^2, ph, pw)
-            pred = (
-                pred.view(B, self.patch_factor, ph, self.patch_factor, pw)
-                .permute(0, 1, 3, 2, 4)
-                .reshape(-1, ph, pw)
-            )
-            gt = (
-                gt.view(B, self.patch_factor, ph, self.patch_factor, pw)
-                .permute(0, 1, 3, 2, 4)
-                .reshape(-1, ph, pw)
-            )
+        if prior_template is not None:
+            # --- [Path A: Dataset-level Prior 방식] ---
+            # 1. 패치별 정규화 (추출 스크립트와 동일한 조건: 평균 0, 분산 1)
+            pred_flat = pred.view(B, -1)
+            pred_mean = pred_flat.mean(dim=1, keepdim=True).view(B, 1, 1)
+            pred_std = pred_flat.std(dim=1, keepdim=True).view(B, 1, 1) + 1e-8
+            pred_norm = (pred - pred_mean) / pred_std
 
-        # 2D FFT 변환
-        pred_freq = self.tensor2freq(pred)  # (B', H', W', 2)
-        gt_freq = self.tensor2freq(gt)      # (B', H', W', 2)
+            # 2. 2D FFT 변환 및 진폭(Amplitude) 추출
+            pred_freq = self.tensor2freq(pred_norm)  # (B, H, W, 2)
+            pred_amp = torch.sqrt(pred_freq[..., 0]**2 + pred_freq[..., 1]**2 + 1e-8)
 
-        # 로그 스케일 (선택): 진폭 범위를 압축하여 학습 안정화
-        if self.log_matrix:
-            pred_freq = pred_freq.sign() * torch.log1p(pred_freq.abs())
-            gt_freq = gt_freq.sign() * torch.log1p(gt_freq.abs())
+            # 3. 템플릿과 비교 (Squared Difference)
+            sq_diff = (pred_amp - prior_template.to(pred_amp.device)).pow(2)
+        else:
+            # --- [기존 방식: GT(정답지) 기반 비교] ---
+            pred_freq = self.tensor2freq(pred)
+            gt_freq = self.tensor2freq(gt)
+            sq_diff = (pred_freq - gt_freq).pow(2).sum(dim=-1)
 
-        # 배치 평균 스펙트럼 (선택): 배치 전체의 대표 주파수 패턴으로 비교
-        if self.ave_spectrum:
-            pred_freq = pred_freq.mean(dim=0, keepdim=True)
-            gt_freq = gt_freq.mean(dim=0, keepdim=True)
+        # ===== [마스킹 로직] =====
+        if self.freq_mask_ratio < 1.0:
+            cy, cx = H // 2, W // 2
+            y = torch.arange(H, device=sq_diff.device).view(-1, 1) - cy
+            x = torch.arange(W, device=sq_diff.device).view(1, -1) - cx
+            r = torch.sqrt(y**2 + x**2)
+            max_r = torch.sqrt(torch.tensor(cy**2 + cx**2, dtype=torch.float32, device=sq_diff.device))
+            mask_radius = max_r * self.freq_mask_ratio
+            mask = (r <= mask_radius).float().view(1, H, W)
+            sq_diff = sq_diff * mask
 
-        return self._compute_loss(pred_freq, gt_freq)
+        # 동적 가중치 (Hard frequency 강조)
+        weight = sq_diff.detach().pow(self.alpha / 2.0)
+        weight = weight / (weight.mean() + 1e-8)
+
+        return (weight * sq_diff).mean()

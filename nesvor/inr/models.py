@@ -413,6 +413,21 @@ class NeSVoR(nn.Module):
                 patch_factor=1,
                 freq_mask_ratio=getattr(self.args, "ff_mask_ratio", 1.0)
             )
+            # [새로 추가된 부분] 템플릿 로드
+            prior_path = getattr(self.args, "ff_prior_template", "")
+            if prior_path != "":
+                import numpy as np
+                import os
+                if os.path.exists(prior_path):
+                    template_np = np.load(prior_path)
+                    template_tensor = torch.from_numpy(template_np).float()
+                    self.register_buffer("freq_prior_template", template_tensor)
+                    logging.info(f"✅ Frequency Prior Template loaded from: {prior_path}")
+                else:
+                    logging.warning(f"❌ Prior Template NOT FOUND: {prior_path}")
+                    self.freq_prior_template = None
+            else:
+                self.freq_prior_template = None
         else:
             self.ff_loss_fn = None
         # ===== [FF Loss 추가 끝] =====
@@ -574,11 +589,29 @@ class NeSVoR(nn.Module):
         v_pred = c * v_pred
         v_pred_patch = v_pred.view(n, P, P)
 
-        mask_float = valid_mask_patch.float()
-        v_pred_patch = v_pred_patch * mask_float
-        v_gt_patch   = v_patch * mask_float
-
-        ff_loss = self.ff_loss_fn(v_pred_patch, v_gt_patch)
+        # ===== [수정된 FF Loss 적용 로직] =====
+        if hasattr(self, "freq_prior_template") and self.freq_prior_template is not None:
+            # 1. 템플릿(Prior) 방식
+            mask_view = valid_mask_patch.view(n, P, P).float()
+            valid_ratio = mask_view.view(n, -1).mean(dim=1)
+            
+            # 패치의 99% 이상이 유효한 뇌 조직인 패치만 선별 (경계면 아티팩트 방지)
+            valid_idx = valid_ratio > 0.99 
+            
+            if valid_idx.sum() > 0:
+                # 마스킹 하지 않은 '순수 예측값'을 넣습니다
+                ff_loss = self.ff_loss_fn(
+                    pred=v_pred_patch[valid_idx], 
+                    prior_template=self.freq_prior_template
+                )
+            else:
+                ff_loss = torch.tensor(0.0, device=xyz_patch.device, requires_grad=True)
+        else:
+            # 2. 기존 방식 (GT 비교)
+            mask_float = valid_mask_patch.float()
+            v_pred_patch = v_pred_patch * mask_float
+            v_gt_patch = v_patch * mask_float
+            ff_loss = self.ff_loss_fn(v_pred_patch, gt=v_gt_patch)
 
         return {FF_LOSS: ff_loss}
     # ===== [FF Loss 추가 끝] =====
