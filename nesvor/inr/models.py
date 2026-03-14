@@ -209,12 +209,12 @@ class INR(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
-        x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
+        x_norm = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0]) # 수정
         prefix_shape = x.shape[:-1]
-        x = x.view(-1, x.shape[-1])
-        pe = self.encoding(x)
+        x_flat = x_norm.view(-1, x_norm.shape[-1]) # 수정
+        pe = self.encoding(x_flat)
         if not self.training:
-            pe = pe.to(dtype=x.dtype)
+            pe = pe.to(dtype=x_flat.dtype)
 
         # ===== [추가] Spatial Gating 적용 =====
         # 1. 위치 정보(x_flat)를 MLP에 넣어 공간 가중치 생성 (Shape: N, n_levels)
