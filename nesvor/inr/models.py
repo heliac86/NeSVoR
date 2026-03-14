@@ -174,6 +174,20 @@ class INR(nn.Module):
             n_hidden_layers=args.depth,
             dtype=torch.float32 if args.img_reg_autodiff else args.dtype,
         )
+
+        # [추가] 공간 인지형 Gating Network (Spatial Gating MLP)=======
+        # x, y, z (3차원)을 입력받아 n_levels 개의 0~1 사이 가중치를 출력
+        self.gating_net = nn.Sequential(
+            nn.Linear(3, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.n_levels),
+            nn.Sigmoid()
+        )
+        
+        # 페널티 값을 저장해둘 임시 변수
+        self.gating_penalty = 0.0
+        # ============================================================
+
         # logging
         logging.debug(
             "hyperparameters for hash grid encoding: "
@@ -201,6 +215,21 @@ class INR(nn.Module):
         pe = self.encoding(x)
         if not self.training:
             pe = pe.to(dtype=x.dtype)
+
+        # ===== [추가] Spatial Gating 적용 =====
+        # 1. 위치 정보(x_flat)를 MLP에 넣어 공간 가중치 생성 (Shape: N, n_levels)
+        spatial_weights = self.gating_net(x_flat)
+        
+        # 2. 페널티(세금) 계산 및 내부 저장 (L1 희소성 페널티)
+        if self.training:
+            # 모든 가중치의 절댓값 평균을 페널티로 저장 (추후 NeSVoR에서 가져감)
+            self.gating_penalty = spatial_weights.abs().mean()
+
+        # 3. 해시 그리드 특징(pe)에 가중치 곱하기
+        pe = pe.view(-1, self.n_levels, self.n_features_per_level)
+        pe = pe * spatial_weights.unsqueeze(-1)  # (N, L, F) * (N, L, 1)
+        pe = pe.view(-1, self.n_levels * self.n_features_per_level)
+        # ===== [추가 끝] =====
         
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
@@ -478,6 +507,12 @@ class NeSVoR(nn.Module):
             )  # deform_reg_autodiff(self.deform_net, xyz_ori, de)
         # image regularization
         losses[I_REG] = self.img_reg(density, xyz)
+
+        # ===== [추가] Gating Sparsity Loss 수집 =====
+        # INR.forward에서 계산해둔 페널티를 가져옵니다.
+        if hasattr(self.inr, 'gating_penalty') and self.inr.training:
+            losses["gatingReg"] = self.inr.gating_penalty
+        # ===== [추가 끝] =====
 
         return losses
 

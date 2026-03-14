@@ -109,6 +109,10 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         # args에 weight_ff_loss가 없으면 0.0으로 간주 (parsers.py 추가 전 호환성)
         FF_LOSS: getattr(args, "weight_ff_loss", 0.0),
         # ===== [FF Loss 추가 끝] =====
+        # ===== [추가] Spatial Gating 페널티 가중치 =====
+        # 이 값이 클수록 모델은 웬만하면 문을 닫으려고(가중치 0) 노력하게 됩니다.
+        "gatingReg": 0.01, 
+        # ===== [추가 끝] =====
     }
 
     # ===== [FF Loss 추가] FF Loss 활성화 여부 및 패치 샘플링 하이퍼파라미터 설정 =====
