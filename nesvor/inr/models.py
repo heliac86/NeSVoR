@@ -230,6 +230,19 @@ class INR(nn.Module):
             # 모든 가중치의 절댓값 평균을 페널티로 저장 (추후 NeSVoR에서 가져감)
             self.gating_penalty = spatial_weights.abs().mean()
 
+            # ===== [관찰용 디버그 코드 추가] =====
+            # 속도 저하를 막기 위해 내부 카운터를 만들어 500번에 1번씩만 평균값 출력
+            if not hasattr(self, '_debug_step'):
+                self._debug_step = 0
+            self._debug_step += 1
+            
+            if self._debug_step % 500 == 0:
+                # N개의 픽셀에 대한 레벨별 평균을 구하고, 보기 좋게 소수점 3자리로 출력
+                mean_w = spatial_weights.mean(dim=0).detach().cpu().numpy()
+                import numpy as np
+                print(f"\n[Step {self._debug_step}] Level-wise Mean Gating: {np.round(mean_w, 3)}")
+            # ===== [디버그 코드 끝] =====
+
         # 3. 해시 그리드 특징(pe)에 가중치 곱하기
         pe = pe.view(-1, self.n_levels, self.n_features_per_level)
         pe = pe * spatial_weights.unsqueeze(-1)  # (N, L, F) * (N, L, 1)
