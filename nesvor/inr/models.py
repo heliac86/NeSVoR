@@ -175,6 +175,11 @@ class INR(nn.Module):
             dtype=torch.float32 if args.img_reg_autodiff else args.dtype,
         )
 
+        # ===== [복구] Gating 연산과 차원 변환에 필수적인 변수 선언 =====
+        self.n_levels = n_levels
+        self.n_features_per_level = args.n_features_per_level
+        # ==========================================================
+
         # [추가] 공간 인지형 Gating Network (Spatial Gating MLP)=======
         # x, y, z (3차원)을 입력받아 n_levels 개의 0~1 사이 가중치를 출력
         self.gating_net = nn.Sequential(
