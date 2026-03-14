@@ -30,11 +30,17 @@ ORIG_PATH  = "/data/BraTS2020_TrainingData/BraTS20_Training_003/BraTS20_Training
 # RECON_PATH = "/dshome/ddualab/dongnyeok/NeSVoR_original/003_flair_base_multiview_x4_02.nii.gz"
 # ALIGNED_RECON_SAVE_PATH = "/dshome/ddualab/dongnyeok/NeSVoR_original/003_flair_aligned_base_multiview_x4_02.nii.gz"
 
-RECON_PATH = "003_flair_4x_07.nii.gz"
-ALIGNED_RECON_SAVE_PATH = "003_flair_aligned_4x_07.nii.gz"
+# RECON_PATH = "003_flair_4x_07.nii.gz"
+# ALIGNED_RECON_SAVE_PATH = "003_flair_aligned_4x_07.nii.gz"
 
 # RECON_PATH = "003_flair_multiview_x4_02.nii.gz"
 # ALIGNED_RECON_SAVE_PATH = "003_flair_aligned_multiview_4x_02.nii.gz"
+
+RECON_PATH = "003_flair_4x4_04.nii.gz"
+ALIGNED_RECON_SAVE_PATH = "003_flair_aligned_4x4_04.nii.gz"
+
+# RECON_PATH = "/dshome/ddualab/dongnyeok/NeSVoR_original/003_flair_base_x44_02.nii.gz"
+# ALIGNED_RECON_SAVE_PATH = "/dshome/ddualab/dongnyeok/NeSVoR_original/003_flair_aligned_base_x44_02.nii.gz"
 
 # ---------------------------------------------------------
 # 2. 정렬 함수

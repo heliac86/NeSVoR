@@ -147,13 +147,6 @@ class INR(nn.Module):
             spatial_scaling,
         )
 
-        # [추가] Gating Mechanism을 위한 변수 및 파라미터 저장
-        self.n_levels = n_levels
-        self.n_features_per_level = args.n_features_per_level
-        
-        # 가중치를 1.0으로 초기화 (원래의 해시 그리드 값을 그대로 통과시키는 상태에서 시작)
-        self.level_weights = nn.Parameter(torch.ones(self.n_levels))
-
         # ===== [k_norm] 역정규화 스케일 인자 =====
         # train.py에서 훈련 직전 dataset.mean 값으로 덮어씀.
         # 1.0으로 초기화하면 정규화를 적용하지 않은 기존 동작과 동일하게 작동함
@@ -208,19 +201,6 @@ class INR(nn.Module):
         pe = self.encoding(x)
         if not self.training:
             pe = pe.to(dtype=x.dtype)
-
-        # [추가한 코드] 해시 그리드 레벨별 가중치 곱하기 (Gating)
-        
-        # 1. pe의 형태를 (N, L * F)에서 (N, L, F)로 변환
-        #    N: 배치 크기, L: n_levels, F: n_features_per_level
-        pe = pe.view(-1, self.n_levels, self.n_features_per_level)
-        
-        # 2. 가중치 곱하기 (Broadcasting 적용)
-        #    self.level_weights의 형태를 (1, L, 1)로 맞추어 각 레벨의 feature에 가중치가 곱해지도록 함
-        pe = pe * self.level_weights.view(1, self.n_levels, 1)
-        
-        # 3. 다시 원래 형태 (N, L * F)로 복구하여 MLP(density_net)에 들어갈 수 있게 함
-        pe = pe.view(-1, self.n_levels * self.n_features_per_level)
         
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
@@ -484,24 +464,6 @@ class NeSVoR(nn.Module):
             var = var + self.log_var_slice.exp()[slice_idx]
         # losses
         losses = {D_LOSS: ((v_out - v) ** 2 / (2 * var)).mean()}
-
-        # ===== [수정] Hash Grid Gating 선별적 페널티 =====
-        if hasattr(self.inr, 'level_weights'):
-            n_levels = self.inr.n_levels
-            penalties = []
-            for i in range(n_levels):
-                # 절반(Level 0~5)은 페널티를 0으로 주어 모델이 자유롭게 쓰도록 허용
-                if i < 6:
-                    penalties.append(0.0)
-                # 나머지 고주파수(Level 6~11)에만 기하급수적 페널티 부여
-                else:
-                    penalties.append(1.5 ** (i - 6)) 
-            
-            penalty_factors = torch.tensor(penalties, device=self.args.device)
-            # 가중치의 제곱에 페널티 계수를 곱해 손실 계산
-            level_reg_loss = ( (self.inr.level_weights ** 2) * penalty_factors ).mean()
-            losses["levelReg"] = level_reg_loss
-        # ===== [수정 끝] =====
 
         if not (self.args.no_pixel_variance and self.args.no_slice_variance):
             losses[S_LOSS] = 0.5 * var.log().mean()
