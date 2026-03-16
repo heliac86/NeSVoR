@@ -407,13 +407,14 @@ class NeSVoR(nn.Module):
             )
         # ===== [FF Loss 추가] FocalFrequencyLoss 인스턴스 초기화 =====
         # weight_ff_loss > 0일 때만 생성. args에 해당 필드가 없으면 0으로 간주 (parsers.py 추가 전 호환성)
-        if getattr(self.args, "weight_ff_loss", 0.0) > 0:
-            self.ff_loss_fn = FocalFrequencyLoss(
-                alpha=getattr(self.args, "ff_alpha", 1.0),
-            )
-        else:
-            self.ff_loss_fn = None
+        # if getattr(self.args, "weight_ff_loss", 0.0) > 0:
+        #     self.ff_loss_fn = FocalFrequencyLoss(
+        #         alpha=getattr(self.args, "ff_alpha", 1.0),
+        #     )
+        # else:
+        #     self.ff_loss_fn = None
         # ===== [FF Loss 추가 끝] =====
+        self.ff_loss_fn = None
 
     def forward(
         self,

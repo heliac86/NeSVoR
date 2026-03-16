@@ -140,14 +140,14 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
             # ===== [FF Loss 추가] 패치 배치 샘플링 및 patch_forward 호출 =====
             # 픽셀 단위 MSE Loss와 동일한 backward()에서 함께 계산됨
-            if use_ff_loss:
-                patch_batch = dataset.get_patch_batch(
-                    n_patches, patch_size, args.device
-                )
+            # if use_ff_loss:
+            #     patch_batch = dataset.get_patch_batch(
+            #         n_patches, patch_size, args.device
+            #     )
                 # 유효한 패치가 하나라도 있을 때만 FF Loss 추가
-                if patch_batch:
-                    patch_losses = model.patch_forward(**patch_batch)
-                    losses.update(patch_losses)  # FF_LOSS 키를 losses에 합치
+            #     if patch_batch:
+            #         patch_losses = model.patch_forward(**patch_batch)
+            #         losses.update(patch_losses)  # FF_LOSS 키를 losses에 합치
             # ===== [FF Loss 추가 끝] =====
 
             loss = 0
