@@ -227,10 +227,15 @@ class INR(nn.Module):
         
         # 2. 페널티(세금) 계산 및 내부 저장 (L1 희소성 페널티)
         if self.training:
-            # 모든 가중치의 절댓값 평균을 페널티로 저장 (추후 NeSVoR에서 가져감)
-            self.gating_penalty = spatial_weights.abs().mean()
+            # 주파수가 높아질수록(뒤쪽 레벨일수록) 페널티를 강하게 주기 위한 가중치 배열 생성
+            # 예: n_levels가 12라면 [0.1, 0.27, 0.44, ..., 1.82, 2.0] 형태가 됨
+            penalty_factors = torch.linspace(0.1, 2.0, steps=self.n_levels, device=spatial_weights.device)
+            
+            # 각 레벨의 가중치에 차등 페널티를 곱한 후 평균 계산
+            weighted_penalty = spatial_weights.abs() * penalty_factors
+            self.gating_penalty = weighted_penalty.mean()
 
-            # ===== [관찰용 디버그 코드 추가] =====
+            # ===== [관찰용 디버그 코드] =====
             # 속도 저하를 막기 위해 내부 카운터를 만들어 500번에 1번씩만 평균값 출력
             if not hasattr(self, '_debug_step'):
                 self._debug_step = 0
