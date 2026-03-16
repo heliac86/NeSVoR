@@ -221,18 +221,28 @@ class INR(nn.Module):
         if not self.training:
             pe = pe.to(dtype=x_flat.dtype)
 
-        # ===== [추가] Spatial Gating 적용 =====
+        # ===== [추가] Spatial Gating 적용 (수정: 저주파 면세 및 강제 개방) =====
         # 1. 위치 정보(x_flat)를 MLP에 넣어 공간 가중치 생성 (Shape: N, n_levels)
-        spatial_weights = self.gating_net(x_flat)
+        raw_spatial_weights = self.gating_net(x_flat)
         
-        # 2. 페널티(세금) 계산 및 내부 저장 (L1 희소성 페널티)
+        # [핵심 개조] 저주파 구간(Level 0 ~ 3) 강제 1.0 고정
+        n_base_levels = 4 # 0, 1, 2, 3번 레벨은 뼈대(거시적 형태)를 담당
+        
+        # 앞의 4개 레벨은 무조건 1.0(완전 개방)으로 덮어씌움
+        base_weights = torch.ones_like(raw_spatial_weights[:, :n_base_levels])
+        # 뒤의 8개 레벨은 MLP가 판단한 가중치 그대로 사용
+        high_weights = raw_spatial_weights[:, n_base_levels:]
+        
+        # 두 텐서를 결합하여 최종 가중치 완성
+        spatial_weights = torch.cat([base_weights, high_weights], dim=-1)
+        
+        # 2. 페널티(세금) 계산 및 내부 저장 (저주파는 면세, 고주파에만 과세)
         if self.training:
-            # 주파수가 높아질수록(뒤쪽 레벨일수록) 페널티를 강하게 주기 위한 가중치 배열 생성
-            # 예: n_levels가 12라면 [0.1, 0.27, 0.44, ..., 1.82, 2.0] 형태가 됨
-            penalty_factors = torch.linspace(0.1, 2.0, steps=self.n_levels, device=spatial_weights.device)
+            # 고주파 레벨(4~11)에 대해서만 차등 페널티 가중치 생성 (예: 0.1부터 2.0까지)
+            penalty_factors = torch.linspace(0.1, 2.0, steps=(self.n_levels - n_base_levels), device=spatial_weights.device)
             
-            # 각 레벨의 가중치에 차등 페널티를 곱한 후 평균 계산
-            weighted_penalty = spatial_weights.abs() * penalty_factors
+            # 면세 구간(base_weights)은 놔두고, 고주파(high_weights)에만 페널티 부과
+            weighted_penalty = high_weights.abs() * penalty_factors
             self.gating_penalty = weighted_penalty.mean()
 
             # ===== [관찰용 디버그 코드] =====
