@@ -125,8 +125,9 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     train_time = 0.0
     for i in range(1, args.n_iter + 1):
         train_step_start = time.time()
-        if i % 500 == 0:
-            print("Learned Hash Grid Weights:", model.inr.level_weights.data)
+        # 게이팅 가중치 관찰용
+        # if i % 500 == 0:
+        #     print("Learned Hash Grid Weights:", model.inr.level_weights.data)
         # forward
         batch = dataset.get_batch(args.batch_size, args.device)
         with torch.cuda.amp.autocast(fp16):

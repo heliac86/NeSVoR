@@ -153,8 +153,8 @@ class INR(nn.Module):
         )
 
         # [추가] Gating Mechanism을 위한 변수 및 파라미터 저장
-        self.n_levels = n_levels
-        self.n_features_per_level = args.n_features_per_level
+        # self.n_levels = n_levels
+        # self.n_features_per_level = args.n_features_per_level
         
         # 가중치를 1.0으로 초기화 (원래의 해시 그리드 값을 그대로 통과시키는 상태에서 시작)
         self.level_weights = nn.Parameter(torch.ones(self.n_levels))
@@ -212,9 +212,9 @@ class INR(nn.Module):
             pe = pe.to(dtype=x.dtype)
 
         # [추가한 코드] 해시 그리드 레벨별 가중치 곱하기 (Gating)
-        pe = pe.view(-1, self.n_levels, self.n_features_per_level)
-        pe = pe * self.level_weights.view(1, self.n_levels, 1)
-        pe = pe.view(-1, self.n_levels * self.n_features_per_level)
+        # pe = pe.view(-1, self.n_levels, self.n_features_per_level)
+        # pe = pe * self.level_weights.view(1, self.n_levels, 1)
+        # pe = pe.view(-1, self.n_levels * self.n_features_per_level)
         
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
