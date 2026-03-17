@@ -7,7 +7,7 @@ import torch.optim as optim
 import logging
 from ..utils import MovingAverage, log_params, TrainLogger
 # ===== [FF Loss 추가] 모델 임포트에 FF_LOSS 키 추가 =====
-from .models import INR, NeSVoR, D_LOSS, S_LOSS, DS_LOSS, I_REG, B_REG, T_REG, D_REG, FF_LOSS
+from .models import INR, NeSVoR, D_LOSS, S_LOSS, DS_LOSS, I_REG, B_REG, T_REG, D_REG, FF_LOSS, SLICE_MSE_KEY
 # ===== [FF Loss 추가 끝] =====
 from ..transform import RigidTransform
 from ..image import Volume, Slice
@@ -45,17 +45,10 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     )
 
     # ===== [k_norm] 훈련 타겟 정규화 =====
-    # 주의: NeSVoR() 생성자 내부에서 dataset.mean으로 model.delta가 설정되므로
-    # 반드시 NeSVoR 생성 이훈에 호출해야 함.
     v_mean = dataset.mean
     logging.info("[k_norm] Training target normalization: v_mean = %.4f", v_mean)
-    dataset.normalize(v_mean)          # self.v 및 slice_images를 v_mean으로 나눔
-    model.inr.v_mean.fill_(v_mean)     # 추론 시 역정규화에 쓸 인자를 INR 버퍼에 저장
-    # model.delta는 NeSVoR 생성 시 args.delta * v_mean으로 설정되었음.
-    # 정규화 훈 density 값이 ~1.0 수준이 되므로
-    # delta도 v_mean으로 나누어 정규화된 공간에서의 임계값으로 복원해야 함.
-    # (img_reg의 edge 모드: delta를 grad 임계값으로 사용하므로
-    #  delta가 너무 크면 regularization이 사실상 비활성화됨)
+    dataset.normalize(v_mean)
+    model.inr.v_mean.fill_(v_mean)
     model.delta = model.delta / v_mean
     logging.info("[k_norm] model.delta rescaled to %.6f", model.delta)
     # ===== [k_norm 끝] =====
@@ -69,7 +62,6 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                 params_net.append(param)
             else:
                 params_encoding.append(param)
-    # logging
     logging.debug(log_params(model))
     optimizer = torch.optim.AdamW(
         params=[
@@ -80,14 +72,12 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         betas=(0.9, 0.99),
         eps=1e-15,
     )
-    # setup scheduler for lr decay
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer=optimizer,
         milestones=list(range(1, len(args.milestones) + 1)),
         gamma=args.gamma,
     )
     decay_milestones = [int(m * args.n_iter) for m in args.milestones]
-    # setup grad scalar for mixed precision training
     fp16 = not args.single_precision
     scaler = torch.cuda.amp.GradScaler(
         init_scale=1.0,
@@ -96,7 +86,6 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         backoff_factor=0.5,
         growth_interval=2000,
     )
-    # training
     model.train()
     loss_weights = {
         D_LOSS: 1,
@@ -105,17 +94,24 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         B_REG: args.weight_bias,
         I_REG: args.weight_image,
         D_REG: args.weight_deform,
-        # ===== [FF Loss 추가] loss_weights 딕셔너리에 FF_LOSS 가중치 등록 =====
-        # args에 weight_ff_loss가 없으면 0.0으로 간주 (parsers.py 추가 전 호환성)
         FF_LOSS: getattr(args, "weight_ff_loss", 0.0),
-        # ===== [FF Loss 추가 끝] =====
     }
 
-    # ===== [FF Loss 추가] FF Loss 활성화 여부 및 패치 샘플링 하이퍼파라미터 설정 =====
-    # model.ff_loss_fn이 초기화된 경우(weight_ff_loss > 0)에만 패치 샘플링 수행
+    # ===== [FF Loss 추가] FF Loss 활성화 여부 및 패치 샘플링 하이퍼파라미터 =====
     use_ff_loss = model.ff_loss_fn is not None
-    patch_size = getattr(args, "patch_size", 16)   # 패치 한 변 크기 (P×P)
-    n_patches  = getattr(args, "n_patches",  8)    # iteration당 샘플링할 패치 수
+    patch_size = getattr(args, "patch_size", 16)
+    n_patches  = getattr(args, "n_patches",  8)
+
+    # ===== [Hard Slice Mining] 슬라이스별 MSE 잔차 EMA 초기화 =====
+    # slice_residuals: 슬라이스별 평균 pixel MSE의 EMA 추적 값 (CPU, float32)
+    # 1.0으로 초기화 → 학습 초기에는 균등 샘플링과 동일
+    # EMA 계수 0.99: ~100 iter마다 실질적인 업데이트
+    SLICE_RESIDUAL_EMA = 0.99
+    n_slices = dataset.n_slices
+    slice_residuals = torch.ones(n_slices, dtype=torch.float32)  # CPU
+    logging.info("[Hard Slice Mining] Initialized slice_residuals for %d slices.", n_slices)
+    # ===== [Hard Slice Mining 끝] =====
+
     if use_ff_loss:
         logging.info(
             "FF Loss enabled: weight=%.4f, patch_size=%d, n_patches=%d",
@@ -124,13 +120,11 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     # ===== [FF Loss 추가 끝] =====
 
     average = MovingAverage(1 - 0.001)
-    # logging
     logging_header = False
     logging.info("NeSVoR training starts.")
     train_time = 0.0
     for i in range(1, args.n_iter + 1):
         train_step_start = time.time()
-        # 가중치 관찰용
         if i % 500 == 0:
             print("Learned Hash Grid Weights:", model.inr.level_weights.data)
         # forward
@@ -138,16 +132,35 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         with torch.cuda.amp.autocast(fp16):
             losses = model(**batch)
 
+            # ===== [Hard Slice Mining] SLICE_MSE_KEY 관리 =====
+            # losses에서 꺼낸 뒤 EMA 업데이트. loss 합산에는 사용되지 않음.
+            if SLICE_MSE_KEY in losses:
+                pixel_mse_vals, s_idx = losses.pop(SLICE_MSE_KEY)
+                # 슬라이스별 평균 MSE를 CPU에서 scatter 방식으로 EMA 업데이트
+                # 동일 iter내 복수 픽셀이 같은 슬라이스에 포함될 수 있으므로
+                # 슬라이스별로 평균을 낸 뒤 EMA 적용
+                for si in s_idx.unique():
+                    mask = (s_idx == si)
+                    mean_mse = pixel_mse_vals[mask].mean().item()
+                    slice_residuals[si.item()] = (
+                        SLICE_RESIDUAL_EMA * slice_residuals[si.item()]
+                        + (1 - SLICE_RESIDUAL_EMA) * mean_mse
+                    )
+            # ===== [Hard Slice Mining 끝] =====
+
             # ===== [FF Loss 추가] 패치 배치 샘플링 및 patch_forward 호출 =====
-            # 픽셀 단위 MSE Loss와 동일한 backward()에서 함께 계산됨
             if use_ff_loss:
+                # ===== [Hard Slice Mining] 잔차 EMA를 샘플링 확률로 변환 =====
+                # 정규화 후 다시 CPU 텐서로 변환하여 get_patch_batch에 전달
+                sampling_probs = slice_residuals / slice_residuals.sum()
+                # ===== [Hard Slice Mining 끝] =====
                 patch_batch = dataset.get_patch_batch(
-                    n_patches, patch_size, args.device
+                    n_patches, patch_size, args.device,
+                    sampling_probs=sampling_probs,
                 )
-                # 유효한 패치가 하나라도 있을 때만 FF Loss 추가
                 if patch_batch:
                     patch_losses = model.patch_forward(**patch_batch)
-                    losses.update(patch_losses)  # FF_LOSS 키를 losses에 합치
+                    losses.update(patch_losses)
             # ===== [FF Loss 추가 끝] =====
 
             loss = 0
@@ -156,7 +169,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                     loss = loss + loss_weights[k] * losses[k]
         # backward
         scaler.scale(loss).backward()
-        if args.debug:  # check nan grad
+        if args.debug:
             for _name, _p in model.named_parameters():
                 if _p.grad is not None and not _p.grad.isfinite().all():
                     logging.warning("iter %d: Found NaNs in the grad of %s", i, _name)
@@ -167,7 +180,6 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         for k in losses:
             average(k, losses[k].item())
         if (decay_milestones and i >= decay_milestones[0]) or i == args.n_iter:
-            # logging
             if not logging_header:
                 train_logger = TrainLogger(
                     "time",
@@ -187,7 +199,6 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             if i < args.n_iter:
                 decay_milestones.pop(0)
                 scheduler.step()
-            # check scaler
             if scaler.is_enabled():
                 current_scaler = scaler.get_scale()
                 if current_scaler < 1 / (2**5):
@@ -202,8 +213,6 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
     # outputs
     transformation = model.transformation
-
-    # undo centering and scaling
     ax = transformation.axisangle()
     ax[:, -3:] *= spatial_scaling
     transformation = RigidTransform(ax)
