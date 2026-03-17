@@ -159,7 +159,26 @@ class Reconstruct(Command):
     def exec(self) -> None:
         input_dict = self.preprocess()
         self.new_timer("Reconsturction")
+
+        # ==========================================
+        # 1. 학습 시작 전: 빈 메모리 공간 미리 확보 (알박기)
+        # ==========================================
+        # 10,000 MiB 크기의 더미 텐서 생성
+        reserved_size = 10000 * 1024 * 1024 
+        dummy_tensor = torch.empty(reserved_size, dtype=torch.int8, device=self.args.device)
+        logging.info("🔒 추론용 GPU 메모리 10,000MiB 확보 완료!")
+        # ==========================================
+
         model, output_slices, mask = train(input_dict["input_slices"], self.args)
+
+        # ==========================================
+        # 2. 추론 시작 직전: 더미 텐서 삭제 및 메모리 반환
+        # ==========================================
+        del dummy_tensor
+        torch.cuda.empty_cache()
+        logging.info("🔓 추론을 위해 확보해둔 메모리 반환 완료!")
+        # ==========================================
+
         self.new_timer("Results saving")
         output_volume, simulated_slices = _sample_inr(
             self.args,
