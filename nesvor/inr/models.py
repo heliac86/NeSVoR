@@ -30,6 +30,11 @@ B_REG = "biasReg"
 T_REG = "transReg"
 I_REG = "imageReg"
 D_REG = "deformReg"
+# ===== [Hard Slice Mining] 슬라이스별 MSE 반환용 내부 키 =====
+# train.py에서 이 키를 꺼내 slice_residuals EMA 업데이트에 사용.
+# loss 계산에는 참여하지 않으므로 loss_weights에 등록하지 않음.
+SLICE_MSE_KEY = "_slice_mse_raw"
+# ===== [Hard Slice Mining 끝] =====
 
 
 def build_encoding(**config):
@@ -155,9 +160,6 @@ class INR(nn.Module):
         self.level_weights = nn.Parameter(torch.ones(self.n_levels))
 
         # ===== [k_norm] 역정규화 스케일 인자 =====
-        # train.py에서 훈련 직전 dataset.mean 값으로 덮어씀.
-        # 1.0으로 초기화하면 정규화를 적용하지 않은 기존 동작과 동일하게 작동함
-        # (호환성 유지 및 롤백 시 이 두 줄 삭제)
         self.register_buffer("v_mean", torch.tensor(1.0, dtype=torch.float32))
         # ===== [k_norm 끝] =====
 
@@ -210,16 +212,8 @@ class INR(nn.Module):
             pe = pe.to(dtype=x.dtype)
 
         # [추가한 코드] 해시 그리드 레벨별 가중치 곱하기 (Gating)
-        
-        # 1. pe의 형태를 (N, L * F)에서 (N, L, F)로 변환
-        #    N: 배치 크기, L: n_levels, F: n_features_per_level
         pe = pe.view(-1, self.n_levels, self.n_features_per_level)
-        
-        # 2. 가중치 곱하기 (Broadcasting 적용)
-        #    self.level_weights의 형태를 (1, L, 1)로 맞추어 각 레벨의 feature에 가중치가 곱해지도록 함
         pe = pe * self.level_weights.view(1, self.n_levels, 1)
-        
-        # 3. 다시 원래 형태 (N, L * F)로 복구하여 MLP(density_net)에 들어갈 수 있게 함
         pe = pe.view(-1, self.n_levels * self.n_features_per_level)
         
         z = self.density_net(pe)
@@ -260,7 +254,6 @@ class DeformNet(nn.Module):
         if TYPE_CHECKING:
             self.bounding_box: torch.Tensor
         self.register_buffer("bounding_box", bounding_box)
-        # hash grid encoding
         base_resolution, n_levels = compute_resolution_nlevel(
             bounding_box,
             args.coarsest_resolution_deform,
@@ -331,7 +324,6 @@ class NeSVoR(nn.Module):
             global USE_TORCH
             USE_TORCH = True
         else:
-            # set default GPU for tinycudann
             torch.cuda.set_device(args.device)
         self.spatial_scaling = spatial_scaling
         self.args = args
@@ -406,7 +398,6 @@ class NeSVoR(nn.Module):
                 dtype=self.args.dtype,
             )
         # ===== [FF Loss 추가] FocalFrequencyLoss 인스턴스 초기화 =====
-        # weight_ff_loss > 0일 때만 생성. args에 해당 필드가 없으면 0으로 간주 (parsers.py 추가 전 호환성)
         if getattr(self.args, "weight_ff_loss", 0.0) > 0:
             self.ff_loss_fn = FocalFrequencyLoss(
                 alpha=getattr(self.args, "ff_alpha", 1.0),
@@ -472,16 +463,15 @@ class NeSVoR(nn.Module):
         v_out = (bias * density).mean(-1)
         v_out = c * v_out
         if not self.args.no_pixel_variance:
-            # var = (bias_detach * psf * var).mean(-1)
             var = (bias_detach * var).mean(-1)
-            # bugfix: --no-slice-scale 시 c=1(int)이므로 tensor 여부를 확인한 뒤 detach
             c_detach = c.detach() if isinstance(c, torch.Tensor) else c
             var = c_detach * var
             var = var**2
         if not self.args.no_slice_variance:
             var = var + self.log_var_slice.exp()[slice_idx]
         # losses
-        losses = {D_LOSS: ((v_out - v) ** 2 / (2 * var)).mean()}
+        pixel_mse = (v_out - v) ** 2 / (2 * var)   # (batch_size,) — 스칼라 집약 전
+        losses = {D_LOSS: pixel_mse.mean()}
         if not (self.args.no_pixel_variance and self.args.no_slice_variance):
             losses[S_LOSS] = 0.5 * var.log().mean()
             losses[DS_LOSS] = losses[D_LOSS] + losses[S_LOSS]
@@ -490,11 +480,14 @@ class NeSVoR(nn.Module):
         if self.args.n_levels_bias:
             losses[B_REG] = log_bias.mean() ** 2
         if self.args.deformable:
-            losses[D_REG] = self.deform_reg(
-                xyz, xyz_ori, de
-            )  # deform_reg_autodiff(self.deform_net, xyz_ori, de)
+            losses[D_REG] = self.deform_reg(xyz, xyz_ori, de)
         # image regularization
         losses[I_REG] = self.img_reg(density, xyz)
+        # ===== [Hard Slice Mining] 슬라이스별 pixel MSE를 detach하여 부가 반환 =====
+        # backward 그래프에 영향을 주지 않도록 detach + float32 고정.
+        # train.py에서 SLICE_MSE_KEY를 꺼낸 뒤 losses에서 제거하여 loss 합산에서 제외.
+        losses[SLICE_MSE_KEY] = (pixel_mse.detach().float(), slice_idx)
+        # ===== [Hard Slice Mining 끝] =====
 
         return losses
 
