@@ -153,11 +153,11 @@ class INR(nn.Module):
         )
 
         # [추가] Gating Mechanism을 위한 변수 및 파라미터 저장
-        # self.n_levels = n_levels
-        # self.n_features_per_level = args.n_features_per_level
+        self.n_levels = n_levels
+        self.n_features_per_level = args.n_features_per_level
         
         # 가중치를 1.0으로 초기화 (원래의 해시 그리드 값을 그대로 통과시키는 상태에서 시작)
-        self.level_weights = nn.Parameter(torch.ones(self.n_levels))
+        # self.level_weights = nn.Parameter(torch.ones(self.n_levels))
 
         # ===== [k_norm] 역정규화 스케일 인자 =====
         self.register_buffer("v_mean", torch.tensor(1.0, dtype=torch.float32))
