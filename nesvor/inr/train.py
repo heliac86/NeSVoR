@@ -103,33 +103,34 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     n_patches  = getattr(args, "n_patches",  8)
 
     # ===== [Hard Slice Mining] 슬라이스별 MSE 잔차 EMA 초기화 =====
-    # slice_residuals: 슬라이스별 평균 pixel MSE의 EMA 추적 값 (CPU, float32)
-    # 1.0으로 초기화 → 학습 초기에는 균등 샘플링과 동일
-    # EMA 계수 0.99: ~100 iter마다 실질적인 업데이트
+    # [E3] 변경: torch.ones 초기화 → 첫 배치 실제 MSE로 초기화
+    # 이유: 초기값 1.0이 실제 MSE(~1e-3~1e-1)보다 회등히 커서 EMA가
+    #       수렴하는 데 ~100 iter가 소요되었음 (E2 워밍업의 근본 원인).
+    #       첫 배치 MSE로 초기화하면 워밍업 없이도 즉시 올바른 잔차 분포를 사용.
     SLICE_RESIDUAL_EMA = 0.99
     n_slices = dataset.n_slices
-    slice_residuals = torch.ones(n_slices, dtype=torch.float32)  # CPU
-    logging.info("[Hard Slice Mining] Initialized slice_residuals for %d slices.", n_slices)
+    slice_residuals = torch.zeros(n_slices, dtype=torch.float32)   # CPU; 첫 배치 후 세팅
+    slice_counts    = torch.zeros(n_slices, dtype=torch.long)      # 초기화 완료 여부 추적
+    _residuals_initialized = False  # 첫 배치 초기화 완료 플래그
+    logging.info("[E3] slice_residuals will be initialized from first batch MSE (no warmup needed).")
+    # ===== [Hard Slice Mining 끝] =====
 
-    # ===== [E2] 워밍업 구간 설정 =====
-    # HARD_MINING_WARMUP iter 동안은 균등 샘플링(sampling_probs=None) 유지.
-    # 이 구간 중에도 EMA는 계속 업데이트되므로,
-    # 워밍업 종료 시점에는 이미 실제 잔차를 반영한 안정적 확률로 전환됨.
-    # args.hard_mining_warmup으로 외부 제어 가능 (없으면 기본값 100 사용).
-    HARD_MINING_WARMUP = getattr(args, "hard_mining_warmup", 100)
+    # ===== [E2 호환성 유지] 워밍업 설정 (E3에서는 0으로 고정 권장) =====
+    # E3는 실제 MSE 초기화로 워밍업 자체가 불필요하지만,
+    # --hard_mining_warmup 인자를 여전히 지원하여 E1/E2 호환성을 유지한다.
+    # E3 관접에서는 0으로 설정하면 첫 배치 이후 즉시 Hard Mining 활성화됨.
+    HARD_MINING_WARMUP = getattr(args, "hard_mining_warmup", 0)
     logging.info(
-        "[E2] Hard Slice Mining warmup: %d iters of uniform sampling before activation.",
+        "[E3] Hard Slice Mining warmup: %d iters (0 = immediate activation after first-batch init).",
         HARD_MINING_WARMUP,
     )
-    # ===== [E2 끝] =====
-    # ===== [Hard Slice Mining 끝] =====
+    # ===== [E2 호환성 끝] =====
 
     if use_ff_loss:
         logging.info(
             "FF Loss enabled: weight=%.4f, patch_size=%d, n_patches=%d",
             loss_weights[FF_LOSS], patch_size, n_patches,
         )
-    # ===== [FF Loss 추가 끝] =====
 
     average = MovingAverage(1 - 0.001)
     logging_header = False
@@ -143,10 +144,31 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             losses = model(**batch)
 
             # ===== [Hard Slice Mining] SLICE_MSE_KEY 관리 =====
-            # losses에서 꺼낸 뒤 EMA 업데이트. loss 합산에는 사용되지 않음.
             if SLICE_MSE_KEY in losses:
                 pixel_mse_vals, s_idx = losses.pop(SLICE_MSE_KEY)
-                # 워밍업 구간에도 EMA는 계속 업데이트하여 전환 시 안정적 확률 확보
+
+                # ===== [E3] 첫 배치: EMA 대신 실제 MSE로 직접 초기화 =====
+                if not _residuals_initialized:
+                    for si in s_idx.unique():
+                        mask = (s_idx == si)
+                        slice_residuals[si.item()] = pixel_mse_vals[mask].mean().item()
+                        slice_counts[si.item()] = 1
+                    # 첫 배치에서 가싘되지 않은 슬라이스는 전체 평균으로 채우기
+                    seen = slice_counts > 0
+                    if seen.any():
+                        init_mean = slice_residuals[seen].mean().item()
+                        slice_residuals[~seen] = init_mean
+                    _residuals_initialized = True
+                    logging.info(
+                        "[E3] slice_residuals initialized from first batch. "
+                        "mean=%.6f, min=%.6f, max=%.6f",
+                        slice_residuals.mean().item(),
+                        slice_residuals.min().item(),
+                        slice_residuals.max().item(),
+                    )
+                # ===== [E3 끝] =====
+
+                # 모든 iter에서 EMA 업데이트 (초기화 후도 지속 추적)
                 for si in s_idx.unique():
                     mask = (s_idx == si)
                     mean_mse = pixel_mse_vals[mask].mean().item()
@@ -158,14 +180,13 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
             # ===== [FF Loss 추가] 패치 배치 샘플링 및 patch_forward 호출 =====
             if use_ff_loss:
-                # ===== [E2] 워밍업 조건: WARMUP 이하이면 균등 샘플링 =====
-                # i <= HARD_MINING_WARMUP: sampling_probs=None → 균등 무작위
+                # i <= HARD_MINING_WARMUP: 균등 샘플링
                 # i >  HARD_MINING_WARMUP: 잔차 EMA 기반 가중 샘플링 활성화
-                if i <= HARD_MINING_WARMUP:
-                    sampling_probs = None  # 균등 샘플링
+                # E3 기본값(HARD_MINING_WARMUP=0)에서는 첫 배치 초기화 후 즉시 활성화됨
+                if i <= HARD_MINING_WARMUP or not _residuals_initialized:
+                    sampling_probs = None
                 else:
                     sampling_probs = slice_residuals / slice_residuals.sum()
-                # ===== [E2 끝] =====
                 patch_batch = dataset.get_patch_batch(
                     n_patches, patch_size, args.device,
                     sampling_probs=sampling_probs,
