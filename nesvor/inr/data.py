@@ -4,6 +4,12 @@ from ..utils import gaussian_blur
 from ..transform import RigidTransform, transform_points
 from ..image import Volume, Slice
 
+# ===== [E3] 패치 유효율 임계값 =====
+# 패치 내 유효 픽셀(뇌 실질) 비율이 이 값 미만이면 해당 패치를 skip.
+# 배경이 대부분인 패치가 FF Loss에 투입되어 주파수 스펙트럼을 오염시키는 것을 방지.
+PATCH_VALID_RATIO_THRESHOLD = 0.5
+# ===== [E3 끝] =====
+
 
 class PointDataset(object):
     def __init__(self, slices: List[Slice]) -> None:
@@ -118,7 +124,7 @@ class PointDataset(object):
                 "v_patch"          : (n, P, P)    GT 픽셀 강도값
                 "slice_idx_patch"  : (n,)         패치가 속한 슬라이스 인덱스
                 "valid_mask_patch" : (n, P, P)    유효 픽셀 bool 마스크
-            패치보다 작은 슬라이스만 존재하면 빈 dict 반환.
+            패치보다 작은 슬라이스만 존재하거나 유효 패치가 없으면 빈 dict 반환.
         """
         P = patch_size
         n_slices = len(self.slice_images)
@@ -128,7 +134,17 @@ class PointDataset(object):
         sidx_list = []
         valid_list = []
 
-        for _ in range(n_patches):
+        # ===== [E3] 패치 유효율 필터링: 최대 시도 횟수 설정 =====
+        # 유효율 미달 패치를 skip하므로 n_patches개를 채우지 못할 수 있음.
+        # 무한 루프 방지를 위해 최대 시도 횟수를 n_patches * 5로 제한.
+        max_attempts = n_patches * 5
+        attempts = 0
+        collected = 0
+        # ===== [E3 끝] =====
+
+        while collected < n_patches and attempts < max_attempts:
+            attempts += 1
+
             # ===== [Hard Slice Mining] 슬라이스 선택 =====
             # sampling_probs가 주어지면 가중 샘플링, 아니면 균등 무작위
             if sampling_probs is not None:
@@ -149,8 +165,17 @@ class PointDataset(object):
             r0 = int(torch.randint(0, H - P + 1, (1,)).item())
             c0 = int(torch.randint(0, W - P + 1, (1,)).item())
 
+            valid_patch = msk[r0 : r0 + P, c0 : c0 + P]
+
+            # ===== [E3] 유효율 필터링 =====
+            # 패치 내 유효 픽셀 비율이 임계값 미만이면 skip.
+            # mean-fill과 함께 작동: 유효 픽셀이 충분해야 fill 평균값이 신뢰할 수 있음.
+            if valid_patch.float().mean().item() < PATCH_VALID_RATIO_THRESHOLD:
+                continue
+            # ===== [E3 끝] =====
+
             v_patch = img[r0 : r0 + P, c0 : c0 + P].to(device)
-            valid_patch = msk[r0 : r0 + P, c0 : c0 + P].to(device)
+            valid_patch = valid_patch.to(device)
 
             rows = torch.arange(r0, r0 + P, dtype=torch.float32, device=device)
             cols = torch.arange(c0, c0 + P, dtype=torch.float32, device=device)
@@ -168,6 +193,7 @@ class PointDataset(object):
                 torch.full((1,), s_idx, dtype=torch.long, device=device)
             )
             valid_list.append(valid_patch)
+            collected += 1
 
         if len(xyz_list) == 0:
             return {}
