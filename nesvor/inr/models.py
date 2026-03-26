@@ -31,7 +31,7 @@ T_REG = "transReg"
 I_REG = "imageReg"
 D_REG = "deformReg"
 # ===== [Hard Slice Mining] 슬라이스별 MSE 반환용 내부 키 =====
-# train.py에서 이 키를 꺼내 slice_residuals EMA 업데이트에 사용.
+# train.py에서 이 키를 꾼내 slice_residuals EMA 업데이트에 사용.
 # loss 계산에는 참여하지 않으므로 loss_weights에 등록하지 않음.
 SLICE_MSE_KEY = "_slice_mse_raw"
 # ===== [Hard Slice Mining 끝] =====
@@ -546,11 +546,28 @@ class NeSVoR(nn.Module):
         v_pred = c * v_pred
         v_pred_patch = v_pred.view(n, P, P)
 
-        mask_float = valid_mask_patch.float()
-        v_pred_patch = v_pred_patch * mask_float
-        v_gt_patch   = v_patch * mask_float
+        # ===== [E3] mean-fill: 배경 픽셀을 0 대신 유효 픽셀 평균값으로 채우기 =====
+        # 도입 이유:
+        #   배경=0 상태로 FFT하면 신호 경계면에서 Gibbs ringing이 발생하여
+        #   뇌 실질 가장자리가 아닌 마스크 경계 패턴을 학습하는 위험이 있음.
+        #   배경을 DC 성분(상수)으로 채우면 주파수 도메인에서 링징 성분이 생성되지 않음.
+        # 참고: GT 참조 불필요 — 입력 데이터(v_patch)만으로 평균 계산.
+        mask_float = valid_mask_patch.float()  # (n, P, P)
+        bg_mask = 1.0 - mask_float             # (n, P, P)
 
-        ff_loss = self.ff_loss_fn(v_pred_patch, v_gt_patch)
+        # 유효 픽셀 평균 계산 (0 나누기 방지를 위해 epsilon 추가)
+        valid_sum_pred = (v_pred_patch * mask_float).sum(dim=(-2, -1))       # (n,)
+        valid_sum_gt   = (v_patch      * mask_float).sum(dim=(-2, -1))       # (n,)
+        valid_count    = mask_float.sum(dim=(-2, -1)).clamp(min=1.0)         # (n,)
+        mean_pred = valid_sum_pred / valid_count                              # (n,)
+        mean_gt   = valid_sum_gt   / valid_count                              # (n,)
+
+        # 배경 영역을 평균값으로 충전
+        v_pred_filled = v_pred_patch * mask_float + mean_pred.view(n, 1, 1) * bg_mask
+        v_gt_filled   = v_patch      * mask_float + mean_gt.view(n, 1, 1)   * bg_mask
+        # ===== [E3 mean-fill 끝] =====
+
+        ff_loss = self.ff_loss_fn(v_pred_filled, v_gt_filled)
 
         return {FF_LOSS: ff_loss}
     # ===== [FF Loss 추가 끝] =====
