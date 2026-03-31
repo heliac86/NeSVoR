@@ -31,7 +31,7 @@ T_REG = "transReg"
 I_REG = "imageReg"
 D_REG = "deformReg"
 # ===== [Hard Slice Mining] 슬라이스별 MSE 반환용 내부 키 =====
-# train.py에서 이 키를 꾼내 slice_residuals EMA 업데이트에 사용.
+# train.py에서 이 키를 꺼내 slice_residuals EMA 업데이트에 사용.
 # loss 계산에는 참여하지 않으므로 loss_weights에 등록하지 않음.
 SLICE_MSE_KEY = "_slice_mse_raw"
 # ===== [Hard Slice Mining 끝] =====
@@ -470,7 +470,7 @@ class NeSVoR(nn.Module):
         if not self.args.no_slice_variance:
             var = var + self.log_var_slice.exp()[slice_idx]
         # losses
-        pixel_mse = (v_out - v) ** 2 / (2 * var)   # (batch_size,) — 스칼라 집약 전
+        pixel_mse = (v_out - v) ** 2 / (2 * var)
         losses = {D_LOSS: pixel_mse.mean()}
         if not (self.args.no_pixel_variance and self.args.no_slice_variance):
             losses[S_LOSS] = 0.5 * var.log().mean()
@@ -483,10 +483,14 @@ class NeSVoR(nn.Module):
             losses[D_REG] = self.deform_reg(xyz, xyz_ori, de)
         # image regularization
         losses[I_REG] = self.img_reg(density, xyz)
-        # ===== [Hard Slice Mining] 슬라이스별 pixel MSE를 detach하여 부가 반환 =====
+        # ===== [Hard Slice Mining] 슬라이스별 raw MSE를 detach하여 부가 반환 =====
+        # [fix] 기존: pixel_mse = (v_out-v)^2 / (2*var) — var 정규화로 Mining 신호 왜곡 가능
+        # [fix] 변경: raw_pixel_mse = (v_out-v)^2 — 순수 제곱 오차로 Mining 신호 소스 교체
+        # 분산 추정이 불안정한 초기 학습에서 var가 과소 추정되면 정규화된 값이 과대해져
+        # 해당 슬라이스가 과샘플링되는 문제를 방지.
         # backward 그래프에 영향을 주지 않도록 detach + float32 고정.
-        # train.py에서 SLICE_MSE_KEY를 꺼낸 뒤 losses에서 제거하여 loss 합산에서 제외.
-        losses[SLICE_MSE_KEY] = (pixel_mse.detach().float(), slice_idx)
+        raw_pixel_mse = (v_out - v).detach().float().pow(2)
+        losses[SLICE_MSE_KEY] = (raw_pixel_mse, slice_idx)
         # ===== [Hard Slice Mining 끝] =====
 
         return losses
