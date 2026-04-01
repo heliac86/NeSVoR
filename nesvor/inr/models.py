@@ -470,7 +470,7 @@ class NeSVoR(nn.Module):
         if not self.args.no_slice_variance:
             var = var + self.log_var_slice.exp()[slice_idx]
         # losses
-        pixel_mse = (v_out - v) ** 2 / (2 * var)
+        pixel_mse = (v_out - v) ** 2 / (2 * var)   # (batch_size,) — 스칼라 집약 전
         losses = {D_LOSS: pixel_mse.mean()}
         if not (self.args.no_pixel_variance and self.args.no_slice_variance):
             losses[S_LOSS] = 0.5 * var.log().mean()
@@ -483,14 +483,10 @@ class NeSVoR(nn.Module):
             losses[D_REG] = self.deform_reg(xyz, xyz_ori, de)
         # image regularization
         losses[I_REG] = self.img_reg(density, xyz)
-        # ===== [Hard Slice Mining] 슬라이스별 raw MSE를 detach하여 부가 반환 =====
-        # [fix] 기존: pixel_mse = (v_out-v)^2 / (2*var) — var 정규화로 Mining 신호 왜곡 가능
-        # [fix] 변경: raw_pixel_mse = (v_out-v)^2 — 순수 제곱 오차로 Mining 신호 소스 교체
-        # 분산 추정이 불안정한 초기 학습에서 var가 과소 추정되면 정규화된 값이 과대해져
-        # 해당 슬라이스가 과샘플링되는 문제를 방지.
+        # ===== [Hard Slice Mining] 슬라이스별 pixel MSE를 detach하여 부가 반환 =====
         # backward 그래프에 영향을 주지 않도록 detach + float32 고정.
-        raw_pixel_mse = (v_out - v).detach().float().pow(2)
-        losses[SLICE_MSE_KEY] = (raw_pixel_mse, slice_idx)
+        # train.py에서 SLICE_MSE_KEY를 꺼낸 뒤 losses에서 제거하여 loss 합산에서 제외.
+        losses[SLICE_MSE_KEY] = (pixel_mse.detach().float(), slice_idx)
         # ===== [Hard Slice Mining 끝] =====
 
         return losses
@@ -551,22 +547,15 @@ class NeSVoR(nn.Module):
         v_pred_patch = v_pred.view(n, P, P)
 
         # ===== [E3] mean-fill: 배경 픽셀을 0 대신 유효 픽셀 평균값으로 채우기 =====
-        # 도입 이유:
-        #   배경=0 상태로 FFT하면 신호 경계면에서 Gibbs ringing이 발생하여
-        #   뇌 실질 가장자리가 아닌 마스크 경계 패턴을 학습하는 위험이 있음.
-        #   배경을 DC 성분(상수)으로 채우면 주파수 도메인에서 링징 성분이 생성되지 않음.
-        # 참고: GT 참조 불필요 — 입력 데이터(v_patch)만으로 평균 계산.
         mask_float = valid_mask_patch.float()  # (n, P, P)
         bg_mask = 1.0 - mask_float             # (n, P, P)
 
-        # 유효 픽셀 평균 계산 (0 나누기 방지를 위해 epsilon 추가)
         valid_sum_pred = (v_pred_patch * mask_float).sum(dim=(-2, -1))       # (n,)
         valid_sum_gt   = (v_patch      * mask_float).sum(dim=(-2, -1))       # (n,)
         valid_count    = mask_float.sum(dim=(-2, -1)).clamp(min=1.0)         # (n,)
         mean_pred = valid_sum_pred / valid_count                              # (n,)
         mean_gt   = valid_sum_gt   / valid_count                              # (n,)
 
-        # 배경 영역을 평균값으로 충전
         v_pred_filled = v_pred_patch * mask_float + mean_pred.view(n, 1, 1) * bg_mask
         v_gt_filled   = v_patch      * mask_float + mean_gt.view(n, 1, 1)   * bg_mask
         # ===== [E3 mean-fill 끝] =====
