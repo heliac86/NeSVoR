@@ -184,17 +184,22 @@ class INR(nn.Module):
         #         → 모든 레벨 가중치 = 1.0 (H3 동작과 동일한 출발점)
         # 정규화: F.softmax(w) * n_levels
         #         → 가중치 합 = n_levels 보존, pe 전체 스케일 불변
-        # 비교: 구버전은 torch.ones로 초기화 + 정규화 없음
-        #       → 학습 중 가중치 합이 변해 pe 스케일이 drift되는 문제 있었음
         self.use_gating = not getattr(args, "no_gating", False)
+        # ===== [G1_D] gating_mode 저장 =====
+        # 'standard' : MSE gradient + FF Loss gradient 모두 level_weights에 흐름
+        # 'ff_direct': patch_forward에서 encoding detach
+        #              → FF Loss gradient가 오직 level_weights로만 집중됨
+        self.gating_mode = getattr(args, "gating_mode", "standard")
+        # ===== [G1_D 끝] =====
         if self.use_gating:
             self.level_weights = nn.Parameter(
                 torch.zeros(n_levels, dtype=torch.float32)
             )
             logging.info(
-                "[G1] Hash grid Gating enabled: n_levels=%d, "
+                "[G1] Hash grid Gating enabled: n_levels=%d, mode=%s, "
                 "init=zeros (softmax -> uniform 1.0), normalization=softmax*n_levels",
                 n_levels,
+                self.gating_mode,
             )
         # ===== [G1 끝] =====
 
@@ -218,6 +223,20 @@ class INR(nn.Module):
             self.bounding_box[1, 2],
         )
 
+    def _apply_gating(self, pe: torch.Tensor) -> torch.Tensor:
+        """레벨별 softmax-normalized 가중치를 pe에 적용.
+        pe shape: (N, n_levels * n_features_per_level)
+        반환:  동일 shape, 가중치 적용 후
+        """
+        weights = F.softmax(self.level_weights, dim=0) * self.n_levels
+        pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
+        pe_gate = pe_gate * weights.view(1, self.n_levels, 1)
+        logging.debug(
+            "[G1] level_weights (softmax): %s",
+            [f"{v:.4f}" for v in weights.detach().cpu().tolist()],
+        )
+        return pe_gate.view(-1, self.n_levels * self.n_features_per_level)
+
     def forward(self, x: torch.Tensor):
         x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x.shape[:-1]
@@ -226,20 +245,9 @@ class INR(nn.Module):
         if not self.training:
             pe = pe.to(dtype=x.dtype)
 
-        # ===== [G1] Softmax-normalized Gating =====
+        # ===== [G1] standard 모드: MSE + FF Loss gradient 모두 level_weights에 흐름 =====
         if self.use_gating:
-            # softmax(w) * n_levels: 합이 n_levels로 보존되어 pe 전체 에너지 불변
-            # detach 없음: level_weights에 gradient가 흘러 학습됨
-            weights = F.softmax(self.level_weights, dim=0) * self.n_levels  # (n_levels,)
-            pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
-            pe_gate = pe_gate * weights.view(1, self.n_levels, 1)
-            pe = pe_gate.view(-1, self.n_levels * self.n_features_per_level)
-            # DEBUG 로깅: 학습 중 레벨별 가중치 추이 추적
-            # train.py에서 별도 로깅 없이 --log-level DEBUG 시 확인 가능
-            logging.debug(
-                "[G1] level_weights (softmax): %s",
-                [f"{v:.4f}" for v in weights.detach().cpu().tolist()],
-            )
+            pe = self._apply_gating(pe)
         # ===== [G1 끝] =====
 
         z = self.density_net(pe)
@@ -248,6 +256,28 @@ class INR(nn.Module):
             return density, pe, z
         else:
             return density
+
+    def forward_ff_direct(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """ff_direct 모드 전용 forward.
+        encoding은 detach → FF Loss gradient가 오직 level_weights로만 흐름.
+        patch_forward에서만 호출됨.
+        """
+        x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
+        prefix_shape = x.shape[:-1]
+        x = x.view(-1, x.shape[-1])
+        # ===== [G1_D] encoding detach: FF Loss가 encoding 파라미터를 업데이트하지 않음 =====
+        pe = self.encoding(x).detach()
+        if not self.training:
+            pe = pe.to(dtype=x.dtype)
+        # level_weights에는 detach 없음 → FF Loss gradient가 level_weights로 집중
+        if self.use_gating:
+            pe = self._apply_gating(pe)
+        # ===== [G1_D 끝] =====
+        z = self.density_net(pe)
+        density = F.softplus(z[..., 0].view(prefix_shape))
+        return density, pe, z
 
     def sample_batch(
         self,
@@ -438,34 +468,27 @@ class NeSVoR(nn.Module):
         v: torch.Tensor,
         slice_idx: torch.Tensor,
     ) -> Dict[str, Any]:
-        # sample psf point
         batch_size = xyz.shape[0]
         n_samples = self.args.n_samples
         xyz_psf = torch.randn(
             batch_size, n_samples, 3, dtype=xyz.dtype, device=xyz.device
         )
-        # psf = 1
         psf_sigma = self.psf_sigma[slice_idx][:, None]
-        # transform points
         t = self.axisangle[slice_idx][:, None]
         xyz = ax_transform_points(
             t, xyz[:, None] + xyz_psf * psf_sigma, self.trans_first
         )
 
-        # deform
         xyz_ori = xyz
         if self.args.deformable:
             de = self.deform_embedding(slice_idx)[:, None].expand(-1, n_samples, -1)
             xyz = self.deform_net(xyz, de)
 
-        # inputs
         if self.args.n_features_slice:
             se = self.slice_embedding(slice_idx)[:, None].expand(-1, n_samples, -1)
         else:
             se = None
-        # forward
         results = self.net_forward(xyz, se)
-        # output
         density = results["density"]
         if "log_bias" in results:
             log_bias = results["log_bias"]
@@ -481,7 +504,6 @@ class NeSVoR(nn.Module):
         else:
             log_var = 0
             var = 1
-        # imaging
         if not self.args.no_slice_scale:
             c: Any = F.softmax(self.logit_coef, 0)[slice_idx] * self.n_slices
         else:
@@ -495,7 +517,6 @@ class NeSVoR(nn.Module):
             var = var**2
         if not self.args.no_slice_variance:
             var = var + self.log_var_slice.exp()[slice_idx]
-        # losses
         pixel_mse = (v_out - v) ** 2 / (2 * var)
         losses = {D_LOSS: pixel_mse.mean()}
         if not (self.args.no_pixel_variance and self.args.no_slice_variance):
@@ -507,15 +528,10 @@ class NeSVoR(nn.Module):
             losses[B_REG] = log_bias.mean() ** 2
         if self.args.deformable:
             losses[D_REG] = self.deform_reg(xyz, xyz_ori, de)
-        # image regularization
         losses[I_REG] = self.img_reg(density, xyz)
-        # ===== [Hard Slice Mining] 슬라이스별 pixel MSE를 detach하여 부가 반환 =====
         losses[SLICE_MSE_KEY] = (pixel_mse.detach().float(), slice_idx)
-        # ===== [Hard Slice Mining 끝] =====
-
         return losses
 
-    # ===== [FF Loss 추가] 패치 단위 순전파 및 FF Loss 계산 메서드 =====
     def patch_forward(
         self,
         xyz_patch: torch.Tensor,
@@ -553,7 +569,13 @@ class NeSVoR(nn.Module):
         else:
             se = None
 
-        results = self.net_forward(xyz_t, se)
+        # ===== [G1_D] ff_direct 모드: encoding detach forward 사용 =====
+        if self.inr.use_gating and self.inr.gating_mode == "ff_direct":
+            results = self.net_forward_ff_direct(xyz_t, se)
+        else:
+            results = self.net_forward(xyz_t, se)
+        # ===== [G1_D 끝] =====
+
         density = results["density"]
 
         if "log_bias" in results:
@@ -573,21 +595,17 @@ class NeSVoR(nn.Module):
         # ===== [E3] mean-fill =====
         mask_float = valid_mask_patch.float()
         bg_mask = 1.0 - mask_float
-
         valid_sum_pred = (v_pred_patch * mask_float).sum(dim=(-2, -1))
         valid_sum_gt   = (v_patch      * mask_float).sum(dim=(-2, -1))
         valid_count    = mask_float.sum(dim=(-2, -1)).clamp(min=1.0)
         mean_pred = valid_sum_pred / valid_count
         mean_gt   = valid_sum_gt   / valid_count
-
         v_pred_filled = v_pred_patch * mask_float + mean_pred.view(n, 1, 1) * bg_mask
         v_gt_filled   = v_patch      * mask_float + mean_gt.view(n, 1, 1)   * bg_mask
         # ===== [E3 mean-fill 끝] =====
 
         ff_loss = self.ff_loss_fn(v_pred_filled, v_gt_filled)
-
         return {FF_LOSS: ff_loss}
-    # ===== [FF Loss 추가 끝] =====
 
     def net_forward(
         self,
@@ -595,6 +613,34 @@ class NeSVoR(nn.Module):
         se: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         density, pe, z = self.inr(x)
+        prefix_shape = density.shape
+        results = {"density": density}
+
+        zs = []
+        if se is not None:
+            zs.append(se.reshape(-1, se.shape[-1]))
+
+        if self.args.n_levels_bias:
+            pe_bias = pe[
+                ..., : self.args.n_levels_bias * self.args.n_features_per_level
+            ]
+            results["log_bias"] = self.b_net(torch.cat(zs + [pe_bias], -1)).view(
+                prefix_shape
+            )
+
+        if not self.args.no_pixel_variance:
+            zs.append(z[..., 1:])
+            results["log_var"] = self.sigma_net(torch.cat(zs, -1)).view(prefix_shape)
+
+        return results
+
+    def net_forward_ff_direct(
+        self,
+        x: torch.Tensor,
+        se: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """ff_direct 모드 전용: encoding detach forward 사용."""
+        density, pe, z = self.inr.forward_ff_direct(x)
         prefix_shape = density.shape
         results = {"density": density}
 
@@ -656,11 +702,10 @@ class NeSVoR(nn.Module):
             raise ValueError("unknown image regularization!")
 
     def deform_reg(self, out, xyz, e):
-        if True:  # use autodiff
+        if True:
             n_sample = 4
             x = xyz[:, :n_sample].flatten(0, 1).detach()
             e = e[:, :n_sample].flatten(0, 1).detach()
-
             x.requires_grad_()
             outputs = self.deform_net(x, e)
             grads = []
