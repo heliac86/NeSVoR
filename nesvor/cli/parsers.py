@@ -88,6 +88,35 @@ def build_parser_training() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable slice-level variance.",
     )
+    # ===== [G1] Gating 관련 CLI 인자 =====
+    parser.add_argument(
+        "--no-gating",
+        action="store_true",
+        help="Disable hash grid level gating (enabled by default).",
+    )
+    parser.add_argument(
+        "--gating-mode",
+        default="standard",
+        type=str,
+        choices=["standard", "ff_direct"],
+        help=(
+            "Gating gradient mode. "
+            "'standard': MSE and FF Loss gradients both flow to level_weights. "
+            "'ff_direct': encoding is detached in patch_forward so FF Loss gradient "
+            "flows exclusively to level_weights (G1_D experiment)."
+        ),
+    )
+    parser.add_argument(
+        "--gating-lr-scale",
+        default=1.0,
+        type=float,
+        help=(
+            "Learning rate multiplier for the level_weights parameter group. "
+            "Set to 10.0 for G1_hlr experiment (faster gating weight differentiation). "
+            "Ignored when --no-gating is set."
+        ),
+    )
+    # ===== [G1 끝] =====
     parser = _parser.add_argument_group("model architecture (deformable part)")
     # deformable net
     parser.add_argument(
@@ -826,7 +855,7 @@ def build_parser_svr() -> argparse.ArgumentParser:
     parser.add_argument(
         "--delta",
         type=float,
-        default=0.2,  # 150.0 / 700.0,
+        default=0.2,
         help="Parameter to define intensity of an edge in edge-preserving regularization. ",
     )
 
