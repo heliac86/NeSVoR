@@ -31,8 +31,6 @@ T_REG = "transReg"
 I_REG = "imageReg"
 D_REG = "deformReg"
 # ===== [Hard Slice Mining] 슬라이스별 MSE 반환용 내부 키 =====
-# train.py에서 이 키를 꺼내 slice_residuals EMA 업데이트에 사용.
-# loss 계산에는 참여하지 않으므로 loss_weights에 등록하지 않음.
 SLICE_MSE_KEY = "_slice_mse_raw"
 # ===== [Hard Slice Mining 끝] =====
 
@@ -152,12 +150,8 @@ class INR(nn.Module):
             spatial_scaling,
         )
 
-        # [추가] Gating Mechanism을 위한 변수 및 파라미터 저장
         self.n_levels = n_levels
         self.n_features_per_level = args.n_features_per_level
-        
-        # 가중치를 1.0으로 초기화 (원래의 해시 그리드 값을 그대로 통과시키는 상태에서 시작)
-        # self.level_weights = nn.Parameter(torch.ones(self.n_levels))
 
         # ===== [k_norm] 역정규화 스케일 인자 =====
         self.register_buffer("v_mean", torch.tensor(1.0, dtype=torch.float32))
@@ -183,6 +177,27 @@ class INR(nn.Module):
             n_hidden_layers=args.depth,
             dtype=torch.float32 if args.img_reg_autodiff else args.dtype,
         )
+
+        # ===== [G1] Softmax-normalized Gating =====
+        # --no-gating 플래그로 비활성화 가능 (기본: 활성화)
+        # 초기화: torch.zeros → softmax 출력이 균등(1/n_levels)에서 시작
+        #         → 모든 레벨 가중치 = 1.0 (H3 동작과 동일한 출발점)
+        # 정규화: F.softmax(w) * n_levels
+        #         → 가중치 합 = n_levels 보존, pe 전체 스케일 불변
+        # 비교: 구버전은 torch.ones로 초기화 + 정규화 없음
+        #       → 학습 중 가중치 합이 변해 pe 스케일이 drift되는 문제 있었음
+        self.use_gating = not getattr(args, "no_gating", False)
+        if self.use_gating:
+            self.level_weights = nn.Parameter(
+                torch.zeros(n_levels, dtype=torch.float32)
+            )
+            logging.info(
+                "[G1] Hash grid Gating enabled: n_levels=%d, "
+                "init=zeros (softmax -> uniform 1.0), normalization=softmax*n_levels",
+                n_levels,
+            )
+        # ===== [G1 끝] =====
+
         # logging
         logging.debug(
             "hyperparameters for hash grid encoding: "
@@ -211,11 +226,22 @@ class INR(nn.Module):
         if not self.training:
             pe = pe.to(dtype=x.dtype)
 
-        # [추가한 코드] 해시 그리드 레벨별 가중치 곱하기 (Gating)
-        # pe = pe.view(-1, self.n_levels, self.n_features_per_level)
-        # pe = pe * self.level_weights.view(1, self.n_levels, 1)
-        # pe = pe.view(-1, self.n_levels * self.n_features_per_level)
-        
+        # ===== [G1] Softmax-normalized Gating =====
+        if self.use_gating:
+            # softmax(w) * n_levels: 합이 n_levels로 보존되어 pe 전체 에너지 불변
+            # detach 없음: level_weights에 gradient가 흘러 학습됨
+            weights = F.softmax(self.level_weights, dim=0) * self.n_levels  # (n_levels,)
+            pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
+            pe_gate = pe_gate * weights.view(1, self.n_levels, 1)
+            pe = pe_gate.view(-1, self.n_levels * self.n_features_per_level)
+            # DEBUG 로깅: 학습 중 레벨별 가중치 추이 추적
+            # train.py에서 별도 로깅 없이 --log-level DEBUG 시 확인 가능
+            logging.debug(
+                "[G1] level_weights (softmax): %s",
+                [f"{v:.4f}" for v in weights.detach().cpu().tolist()],
+            )
+        # ===== [G1 끝] =====
+
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
         if self.training:
@@ -470,7 +496,7 @@ class NeSVoR(nn.Module):
         if not self.args.no_slice_variance:
             var = var + self.log_var_slice.exp()[slice_idx]
         # losses
-        pixel_mse = (v_out - v) ** 2 / (2 * var)   # (batch_size,) — 스칼라 집약 전
+        pixel_mse = (v_out - v) ** 2 / (2 * var)
         losses = {D_LOSS: pixel_mse.mean()}
         if not (self.args.no_pixel_variance and self.args.no_slice_variance):
             losses[S_LOSS] = 0.5 * var.log().mean()
@@ -484,8 +510,6 @@ class NeSVoR(nn.Module):
         # image regularization
         losses[I_REG] = self.img_reg(density, xyz)
         # ===== [Hard Slice Mining] 슬라이스별 pixel MSE를 detach하여 부가 반환 =====
-        # backward 그래프에 영향을 주지 않도록 detach + float32 고정.
-        # train.py에서 SLICE_MSE_KEY를 꺼낸 뒤 losses에서 제거하여 loss 합산에서 제외.
         losses[SLICE_MSE_KEY] = (pixel_mse.detach().float(), slice_idx)
         # ===== [Hard Slice Mining 끝] =====
 
@@ -500,11 +524,11 @@ class NeSVoR(nn.Module):
         valid_mask_patch: torch.Tensor,
     ) -> Dict[str, Any]:
         n = xyz_patch.shape[0]
-        PP = xyz_patch.shape[1]   # P*P
+        PP = xyz_patch.shape[1]
         P = int(PP ** 0.5)
 
         xyz_flat = xyz_patch.view(n * PP, 3)
-        slice_idx_flat = slice_idx_patch.repeat_interleave(PP)  # (n*P*P,)
+        slice_idx_flat = slice_idx_patch.repeat_interleave(PP)
 
         n_samples = self.args.n_samples
         xyz_psf = torch.randn(
@@ -546,15 +570,15 @@ class NeSVoR(nn.Module):
         v_pred = c * v_pred
         v_pred_patch = v_pred.view(n, P, P)
 
-        # ===== [E3] mean-fill: 배경 픽셀을 0 대신 유효 픽셀 평균값으로 채우기 =====
-        mask_float = valid_mask_patch.float()  # (n, P, P)
-        bg_mask = 1.0 - mask_float             # (n, P, P)
+        # ===== [E3] mean-fill =====
+        mask_float = valid_mask_patch.float()
+        bg_mask = 1.0 - mask_float
 
-        valid_sum_pred = (v_pred_patch * mask_float).sum(dim=(-2, -1))       # (n,)
-        valid_sum_gt   = (v_patch      * mask_float).sum(dim=(-2, -1))       # (n,)
-        valid_count    = mask_float.sum(dim=(-2, -1)).clamp(min=1.0)         # (n,)
-        mean_pred = valid_sum_pred / valid_count                              # (n,)
-        mean_gt   = valid_sum_gt   / valid_count                              # (n,)
+        valid_sum_pred = (v_pred_patch * mask_float).sum(dim=(-2, -1))
+        valid_sum_gt   = (v_patch      * mask_float).sum(dim=(-2, -1))
+        valid_count    = mask_float.sum(dim=(-2, -1)).clamp(min=1.0)
+        mean_pred = valid_sum_pred / valid_count
+        mean_gt   = valid_sum_gt   / valid_count
 
         v_pred_filled = v_pred_patch * mask_float + mean_pred.view(n, 1, 1) * bg_mask
         v_gt_filled   = v_patch      * mask_float + mean_gt.view(n, 1, 1)   * bg_mask
