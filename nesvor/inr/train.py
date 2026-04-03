@@ -129,20 +129,43 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         # ===== [G2 끝] =====
     }
 
-    # ===== [G2] Diversity Loss 활성화 여부 =====
+    # ===== [G3] Diversity Loss 설정 =====
     use_diversity_loss = (
         not getattr(args, "no_gating", False)
         and loss_weights[DIVERSITY_LOSS] > 0.0
         and bool(params_gating)
     )
+    # diversity loss 가 적용될 공간: 'raw'(logit) 또는 'softmax'(실제 gating 출력)
+    diversity_loss_space = getattr(args, "diversity_loss_space", "raw")
+    # target_var: 이 값 이상으로 업되면 loss=0 (발산 방지 브레이크)
+    target_diversity_var = getattr(args, "target_diversity_var", 0.05)
+    # gating grad clip (0 = 비활성화)
+    gating_grad_clip = getattr(args, "gating_grad_clip", 0.0)
+
     if use_diversity_loss:
-        # level_weights 파라미터를 직접 참조
         _level_weights_param = params_gating[0]
         logging.info(
-            "[G2] Diversity Loss enabled: weight=%.4f",
+            "[G3] Diversity Loss enabled: weight=%.4f, space=%s, target_var=%.4f, grad_clip=%.2f",
             loss_weights[DIVERSITY_LOSS],
+            diversity_loss_space,
+            target_diversity_var,
+            gating_grad_clip,
         )
-    # ===== [G2 끝] =====
+    # ===== [G3 끝] =====
+
+    # ===== [G3_warmup] Density net warmup freeze 설정 =====
+    gating_warmup_iters = 0
+    if not getattr(args, "no_gating", False) and bool(params_gating):
+        gating_warmup_iters = getattr(args, "gating_warmup_iters", 0)
+    if gating_warmup_iters > 0:
+        logging.info(
+            "[G3_warmup] density_net will be frozen for the first %d iters.",
+            gating_warmup_iters,
+        )
+        # 시작 시점: density_net 동결
+        for p in model.inr.density_net.parameters():
+            p.requires_grad_(False)
+    # ===== [G3_warmup 끝] =====
 
     # ===== [FF Loss 추가] FF Loss 활성화 여부 및 패치 샘플링 하이퍼파라미터 =====
     use_ff_loss = model.ff_loss_fn is not None
@@ -176,6 +199,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     train_time = 0.0
     for i in range(1, args.n_iter + 1):
         train_step_start = time.time()
+
+        # ===== [G3_warmup] warmup 종료 시점에 density_net 해동 =====
+        if gating_warmup_iters > 0 and i == gating_warmup_iters + 1:
+            for p in model.inr.density_net.parameters():
+                p.requires_grad_(True)
+            logging.info(
+                "[G3_warmup] density_net unfrozen at iter %d.", i
+            )
+        # ===== [G3_warmup 끝] =====
+
         # forward
         batch = dataset.get_batch(args.batch_size, args.device)
         with torch.cuda.amp.autocast(fp16):
@@ -227,12 +260,23 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                     losses.update(patch_losses)
             # ===== [FF Loss 추가 끝] =====
 
-            # ===== [G2] Diversity Loss 계산 =====
-            # -var(level_weights): 분산이 작으면 패널티, 크면 보상
-            # autocast 블록 안에서 계산하므로 fp16 환경과 일관성 유지
+            # ===== [G3] Diversity Loss 계산 (soft target var) =====
             if use_diversity_loss:
-                losses[DIVERSITY_LOSS] = -torch.var(_level_weights_param)
-            # ===== [G2 끝] =====
+                if diversity_loss_space == "softmax":
+                    # softmax 출력 기준: 실제 gating에 사용되는 가중치의 분산
+                    # _apply_gating 내부 동일 연산: softmax(w) * n_levels
+                    import torch.nn.functional as F
+                    _softmax_weights = F.softmax(_level_weights_param, dim=0) * model.inr.n_levels
+                    _var_target = torch.var(_softmax_weights)
+                else:
+                    # raw logit 기준 (G3_softvar, 기본)
+                    _var_target = torch.var(_level_weights_param)
+                # relu: target_var 에 도달하면 loss=0, 미달 시에만 패널티
+                losses[DIVERSITY_LOSS] = torch.relu(
+                    torch.tensor(target_diversity_var, dtype=_var_target.dtype, device=_var_target.device)
+                    - _var_target
+                )
+            # ===== [G3 끝] =====
 
             loss = 0
             for k in losses:
@@ -240,6 +284,13 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                     loss = loss + loss_weights[k] * losses[k]
         # backward
         scaler.scale(loss).backward()
+
+        # ===== [G3] gating 그룹 gradient clipping =====
+        if gating_grad_clip > 0.0 and params_gating:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(params_gating, max_norm=gating_grad_clip)
+        # ===== [G3 끝] =====
+
         if args.debug:
             for _name, _p in model.named_parameters():
                 if _p.grad is not None and not _p.grad.isfinite().all():
