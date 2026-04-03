@@ -13,6 +13,10 @@ from ..transform import RigidTransform
 from ..image import Volume, Slice
 from .data import PointDataset
 
+# ===== [G2] Diversity Loss 키 =====
+DIVERSITY_LOSS = "diversity_loss"
+# ===== [G2 끝] =====
+
 
 def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volume]:
     # create training dataset
@@ -120,7 +124,25 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         I_REG: args.weight_image,
         D_REG: args.weight_deform,
         FF_LOSS: getattr(args, "weight_ff_loss", 0.0),
+        # ===== [G2] Diversity Loss 가중치 =====
+        DIVERSITY_LOSS: getattr(args, "weight_diversity_loss", 0.0),
+        # ===== [G2 끝] =====
     }
+
+    # ===== [G2] Diversity Loss 활성화 여부 =====
+    use_diversity_loss = (
+        not getattr(args, "no_gating", False)
+        and loss_weights[DIVERSITY_LOSS] > 0.0
+        and bool(params_gating)
+    )
+    if use_diversity_loss:
+        # level_weights 파라미터를 직접 참조
+        _level_weights_param = params_gating[0]
+        logging.info(
+            "[G2] Diversity Loss enabled: weight=%.4f",
+            loss_weights[DIVERSITY_LOSS],
+        )
+    # ===== [G2 끝] =====
 
     # ===== [FF Loss 추가] FF Loss 활성화 여부 및 패치 샘플링 하이퍼파라미터 =====
     use_ff_loss = model.ff_loss_fn is not None
@@ -204,6 +226,13 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                     patch_losses = model.patch_forward(**patch_batch)
                     losses.update(patch_losses)
             # ===== [FF Loss 추가 끝] =====
+
+            # ===== [G2] Diversity Loss 계산 =====
+            # -var(level_weights): 분산이 작으면 패널티, 크면 보상
+            # autocast 블록 안에서 계산하므로 fp16 환경과 일관성 유지
+            if use_diversity_loss:
+                losses[DIVERSITY_LOSS] = -torch.var(_level_weights_param)
+            # ===== [G2 끝] =====
 
             loss = 0
             for k in losses:
