@@ -273,6 +273,60 @@ def build_parser_training() -> argparse.ArgumentParser:
         ),
     )
     # ===== [G2 끝] =====
+    # ===== [G3] Soft Target Variance Loss 관련 인자 =====
+    parser.add_argument(
+        "--target-diversity-var",
+        default=0.05,
+        type=float,
+        help=(
+            "Target variance for Diversity Loss (soft target mode). "
+            "When variance of level_weights exceeds this value, the diversity loss becomes 0 "
+            "(no further push), preventing divergence. "
+            "Only used when --weight-diversity-loss > 0 and --no-gating is not set. "
+            "Default: 0.05 (stable level observed in G2_div001). "
+            "For softmax-output-based diversity (--diversity-loss-space=softmax), "
+            "a larger value such as 0.5 is recommended."
+        ),
+    )
+    parser.add_argument(
+        "--diversity-loss-space",
+        default="raw",
+        type=str,
+        choices=["raw", "softmax"],
+        help=(
+            "Space in which the Diversity Loss variance is computed. "
+            "'raw'    : variance of raw level_weights (logit space). G3_softvar experiment. "
+            "'softmax': variance of softmax(level_weights)*n_levels (actual gating output). "
+            "           More stable target space. G3_softvar_softmax experiment. "
+            "Ignored when --weight-diversity-loss is 0 or --no-gating is set."
+        ),
+    )
+    parser.add_argument(
+        "--gating-grad-clip",
+        default=0.0,
+        type=float,
+        help=(
+            "Max norm for gradient clipping applied to the level_weights parameter group. "
+            "Set to 1.0 to enable clipping (recommended when --weight-diversity-loss > 0). "
+            "Set to 0 (default) to disable clipping. "
+            "Ignored when --no-gating is set."
+        ),
+    )
+    # ===== [G3 끝] =====
+    # ===== [G3_warmup] Density net warmup freeze 관련 인자 =====
+    parser.add_argument(
+        "--gating-warmup-iters",
+        default=0,
+        type=int,
+        help=(
+            "Number of iterations to freeze density_net at the start of training, "
+            "allowing level_weights to differentiate before density_net adapts. "
+            "Set to 0 (default) to disable warmup freeze. "
+            "Recommended starting value: 500 (~10%% of default n_iter=6000). "
+            "Ignored when --no-gating is set."
+        ),
+    )
+    # ===== [G3_warmup 끝] =====
 
     # training
     parser = _parser.add_argument_group("training")
