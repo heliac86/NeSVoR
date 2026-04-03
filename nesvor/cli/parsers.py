@@ -259,6 +259,20 @@ def build_parser_training() -> argparse.ArgumentParser:
         ),
     )
     # ===== [FF Loss 추가 끝] =====
+    # ===== [G2] Diversity Loss 관련 인자 =====
+    parser.add_argument(
+        "--weight-diversity-loss",
+        default=0.0,
+        type=float,
+        help=(
+            "Weight of Diversity Loss for level_weights differentiation. "
+            "Penalizes low variance of level_weights, encouraging the gating "
+            "to differentiate hash grid levels. "
+            "Recommended starting value: 0.01. "
+            "Ignored when --no-gating is set or when set to 0 (default)."
+        ),
+    )
+    # ===== [G2 끝] =====
 
     # training
     parser = _parser.add_argument_group("training")
