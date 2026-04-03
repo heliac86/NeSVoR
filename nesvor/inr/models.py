@@ -179,18 +179,8 @@ class INR(nn.Module):
         )
 
         # ===== [G1] Softmax-normalized Gating =====
-        # --no-gating 플래그로 비활성화 가능 (기본: 활성화)
-        # 초기화: torch.zeros → softmax 출력이 균등(1/n_levels)에서 시작
-        #         → 모든 레벨 가중치 = 1.0 (H3 동작과 동일한 출발점)
-        # 정규화: F.softmax(w) * n_levels
-        #         → 가중치 합 = n_levels 보존, pe 전체 스케일 불변
         self.use_gating = not getattr(args, "no_gating", False)
-        # ===== [G1_D] gating_mode 저장 =====
-        # 'standard' : MSE gradient + FF Loss gradient 모두 level_weights에 흐름
-        # 'ff_direct': patch_forward에서 encoding detach
-        #              → FF Loss gradient가 오직 level_weights로만 집중됨
         self.gating_mode = getattr(args, "gating_mode", "standard")
-        # ===== [G1_D 끝] =====
         if self.use_gating:
             self.level_weights = nn.Parameter(
                 torch.zeros(n_levels, dtype=torch.float32)
@@ -223,10 +213,14 @@ class INR(nn.Module):
             self.bounding_box[1, 2],
         )
 
-    def _apply_gating(self, pe: torch.Tensor) -> torch.Tensor:
+    def _apply_gating(self, pe: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """레벨별 softmax-normalized 가중치를 pe에 적용.
         pe shape: (N, n_levels * n_features_per_level)
-        반환:  동일 shape, 가중치 적용 후
+
+        반환:
+            pe_gated : 가중치 적용 후 pe (동일 shape)
+            weights  : softmax(level_weights) * n_levels  shape: (n_levels,)
+                       train.py에서 diversity loss 계산에 사용
         """
         weights = F.softmax(self.level_weights, dim=0) * self.n_levels
         pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
@@ -235,7 +229,7 @@ class INR(nn.Module):
             "[G1] level_weights (softmax): %s",
             [f"{v:.4f}" for v in weights.detach().cpu().tolist()],
         )
-        return pe_gate.view(-1, self.n_levels * self.n_features_per_level)
+        return pe_gate.view(-1, self.n_levels * self.n_features_per_level), weights
 
     def forward(self, x: torch.Tensor):
         x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
@@ -245,21 +239,22 @@ class INR(nn.Module):
         if not self.training:
             pe = pe.to(dtype=x.dtype)
 
-        # ===== [G1] standard 모드: MSE + FF Loss gradient 모두 level_weights에 흐름 =====
+        # ===== [G1] standard 모드: MSE + FF Loss gradient 모두 level_weights에 흔름 =====
+        gating_weights = None
         if self.use_gating:
-            pe = self._apply_gating(pe)
+            pe, gating_weights = self._apply_gating(pe)
         # ===== [G1 끝] =====
 
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
         if self.training:
-            return density, pe, z
+            return density, pe, z, gating_weights
         else:
             return density
 
     def forward_ff_direct(
         self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """ff_direct 모드 전용 forward.
         encoding은 detach → FF Loss gradient가 오직 level_weights로만 흐름.
         patch_forward에서만 호출됨.
@@ -267,17 +262,17 @@ class INR(nn.Module):
         x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x.shape[:-1]
         x = x.view(-1, x.shape[-1])
-        # ===== [G1_D] encoding detach: FF Loss가 encoding 파라미터를 업데이트하지 않음 =====
+        # ===== [G1_D] encoding detach =====
         pe = self.encoding(x).detach()
         if not self.training:
             pe = pe.to(dtype=x.dtype)
-        # level_weights에는 detach 없음 → FF Loss gradient가 level_weights로 집중
+        gating_weights = None
         if self.use_gating:
-            pe = self._apply_gating(pe)
+            pe, gating_weights = self._apply_gating(pe)
         # ===== [G1_D 끝] =====
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
-        return density, pe, z
+        return density, pe, z, gating_weights
 
     def sample_batch(
         self,
@@ -612,7 +607,7 @@ class NeSVoR(nn.Module):
         x: torch.Tensor,
         se: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        density, pe, z = self.inr(x)
+        density, pe, z, _gating_weights = self.inr(x)
         prefix_shape = density.shape
         results = {"density": density}
 
@@ -640,7 +635,7 @@ class NeSVoR(nn.Module):
         se: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """ff_direct 모드 전용: encoding detach forward 사용."""
-        density, pe, z = self.inr.forward_ff_direct(x)
+        density, pe, z, _gating_weights = self.inr.forward_ff_direct(x)
         prefix_shape = density.shape
         results = {"density": density}
 
@@ -678,7 +673,7 @@ class NeSVoR(nn.Module):
             n_sample = 4
             xyz = xyz[:, :n_sample].flatten(0, 1).detach()
             xyz.requires_grad_()
-            density, _, _ = self.inr(xyz)
+            density, _, _, _ = self.inr(xyz)
             grad = (
                 torch.autograd.grad((density.sum(),), (xyz,), create_graph=True)[0]
                 / self.spatial_scaling
