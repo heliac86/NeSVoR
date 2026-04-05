@@ -60,16 +60,17 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     # setup optimizer
     params_net = []
     params_encoding = []
-    # ===== [G1_hlr] level_weights 전용 파라미터 그룹 분리 =====
+    # ===== [G1_hlr / G6] gating 파라미터 그룹 분리 =====
+    # level_weights (G1~G5 전역 gating) 및 gating_net (G6 GatingMLP) 모두 포함
     params_gating = []
     gating_lr_scale = getattr(args, "gating_lr_scale", 1.0)
     # ===== [G1_hlr 끝] =====
     for name, param in model.named_parameters():
         if param.numel() > 0:
-            # ===== [G1_hlr] level_weights를 별도 그룹으로 분리 =====
-            if "level_weights" in name:
+            # ===== [G1_hlr / G6] level_weights 및 gating_net 파라미터를 별도 그룹으로 분리 =====
+            if "level_weights" in name or "gating_net" in name:
                 params_gating.append(param)
-            # ===== [G1_hlr 끝] =====
+            # ===== [G1_hlr / G6 끝] =====
             elif "_net" in name:
                 params_net.append(param)
             else:
@@ -88,10 +89,11 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             "lr": args.learning_rate * gating_lr_scale,
         })
         logging.info(
-            "[G1_hlr] Gating optimizer group: lr=%.2e (base=%.2e x scale=%.1f)",
+            "[G1_hlr/G6] Gating optimizer group: lr=%.2e (base=%.2e x scale=%.1f), n_params=%d",
             args.learning_rate * gating_lr_scale,
             args.learning_rate,
             gating_lr_scale,
+            sum(p.numel() for p in params_gating),
         )
     # ===== [G1_hlr 끝] =====
 
@@ -129,11 +131,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         # ===== [G2 끝] =====
     }
 
+    # ===== [G6] spatial_gating 여부 확인 =====
+    spatial_gating = getattr(model.inr, "spatial_gating", False)
+    # ===== [G6 끝] =====
+
     # ===== [G3] Diversity Loss 설정 =====
     use_diversity_loss = (
         not getattr(args, "no_gating", False)
         and loss_weights[DIVERSITY_LOSS] > 0.0
         and bool(params_gating)
+        and not spatial_gating  # [G6] GatingMLP 사용 시 전역 diversity loss 비활성화
     )
     # diversity loss 가 적용될 공간: 'raw'(logit) 또는 'softmax'(실제 gating 출력)
     diversity_loss_space = getattr(args, "diversity_loss_space", "raw")
@@ -141,6 +148,13 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     target_diversity_var = getattr(args, "target_diversity_var", 0.05)
     # gating grad clip (0 = 비활성화)
     gating_grad_clip = getattr(args, "gating_grad_clip", 0.0)
+
+    if spatial_gating and loss_weights[DIVERSITY_LOSS] > 0.0:
+        logging.info(
+            "[G6] --weight-diversity-loss is set but --spatial-gating is enabled. "
+            "Global diversity loss is skipped for GatingMLP (per-coordinate gating). "
+            "Use spatial regularization instead if needed."
+        )
 
     if use_diversity_loss:
         _level_weights_param = params_gating[0]
