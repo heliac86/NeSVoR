@@ -116,6 +116,33 @@ def build_parser_training() -> argparse.ArgumentParser:
             "Ignored when --no-gating is set."
         ),
     )
+    # ===== [G6] 공간 적응형 게이팅 인자 =====
+    parser.add_argument(
+        "--spatial-gating",
+        action="store_true",
+        help=(
+            "Enable spatially-adaptive hash grid level gating (G6). "
+            "Instead of a single global level_weights vector, a small MLP (GatingMLP) "
+            "predicts per-coordinate level weights from normalized 3D coordinates. "
+            "This allows different spatial regions (e.g., cortex vs white matter) "
+            "to emphasize different frequency levels independently. "
+            "Requires --no-gating to be unset. "
+            "See also --gating-hidden-dim."
+        ),
+    )
+    parser.add_argument(
+        "--gating-hidden-dim",
+        default=32,
+        type=int,
+        help=(
+            "Hidden layer size of the GatingMLP used in spatially-adaptive gating (--spatial-gating). "
+            "GatingMLP architecture: Linear(3 -> H) -> ReLU -> Linear(H -> n_levels). "
+            "Larger values increase expressiveness but add compute cost. "
+            "Default: 32 (~500 parameters for n_levels=12). "
+            "Ignored when --spatial-gating is not set."
+        ),
+    )
+    # ===== [G6 끝] =====
     # ===== [G1 끝] =====
     parser = _parser.add_argument_group("model architecture (deformable part)")
     # deformable net
@@ -882,7 +909,7 @@ def build_parser_svr() -> argparse.ArgumentParser:
         "--global-ncc-threshold",
         type=float,
         default=0.5,
-        help="Threshold for global exclusion.",
+        help="Threshold for removing low-quality stacks based on NCC.",
     )
     parser.add_argument(
         "--local-ssim-threshold",
