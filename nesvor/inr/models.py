@@ -133,6 +133,50 @@ def compute_resolution_nlevel(
     return int(base_resolution), int(n_levels)
 
 
+# ===== [G6] GatingMLP: 좌표 → 위치별 level_weights 출력 =====
+class GatingMLP(nn.Module):
+    """
+    공간 적응형 게이팅 네트워크.
+
+    입력: 정규화된 3D 좌표 (N, 3), 범위 [0, 1]^3
+    출력: 위치별 level logits (N, n_levels)
+          → _apply_gating 내에서 softmax * n_levels 를 거쳐 가중치로 변환
+
+    구조: Linear(3 → hidden_dim) → ReLU → Linear(hidden_dim → n_levels)
+    파라미터 수: 3*H + H + H*L + L  (H=hidden_dim, L=n_levels)
+                 H=32, L=12 기준 약 500개
+
+    초기화: 마지막 레이어를 zeros 로 초기화
+            → 학습 시작 시 모든 위치에서 softmax 출력이 균등 (1.0)
+            → 기존 전역 level_weights=zeros 초기 상태와 동일
+    """
+
+    def __init__(self, n_levels: int, hidden_dim: int = 32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, n_levels),
+        )
+        # 마지막 레이어 zeros 초기화 → 초기 출력 = 균등 가중치
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+        logging.info(
+            "[G6] GatingMLP initialized: 3 -> %d -> %d, params=%d",
+            hidden_dim,
+            n_levels,
+            sum(p.numel() for p in self.parameters()),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (N, 3) 정규화 좌표
+        반환: (N, n_levels) logit
+        """
+        return self.net(x)
+# ===== [G6 끝] =====
+
+
 class INR(nn.Module):
     def __init__(
         self, bounding_box: torch.Tensor, args: Namespace, spatial_scaling: float = 1.0
@@ -181,16 +225,36 @@ class INR(nn.Module):
         # ===== [G1] Softmax-normalized Gating =====
         self.use_gating = not getattr(args, "no_gating", False)
         self.gating_mode = getattr(args, "gating_mode", "standard")
+
+        # ===== [G6] 공간 적응형 게이팅 여부 =====
+        self.spatial_gating = (
+            self.use_gating and getattr(args, "spatial_gating", False)
+        )
+        # ===== [G6 끝] =====
+
         if self.use_gating:
-            self.level_weights = nn.Parameter(
-                torch.zeros(n_levels, dtype=torch.float32)
-            )
-            logging.info(
-                "[G1] Hash grid Gating enabled: n_levels=%d, mode=%s, "
-                "init=zeros (softmax -> uniform 1.0), normalization=softmax*n_levels",
-                n_levels,
-                self.gating_mode,
-            )
+            if self.spatial_gating:
+                # [G6] GatingMLP: 좌표 → 위치별 level logits
+                gating_hidden_dim = getattr(args, "gating_hidden_dim", 32)
+                self.gating_net = GatingMLP(
+                    n_levels=n_levels, hidden_dim=gating_hidden_dim
+                )
+                logging.info(
+                    "[G6] Spatial Gating enabled: n_levels=%d, hidden_dim=%d",
+                    n_levels,
+                    gating_hidden_dim,
+                )
+            else:
+                # [G1] 전역 level_weights (기존 방식)
+                self.level_weights = nn.Parameter(
+                    torch.zeros(n_levels, dtype=torch.float32)
+                )
+                logging.info(
+                    "[G1] Hash grid Gating enabled: n_levels=%d, mode=%s, "
+                    "init=zeros (softmax -> uniform 1.0), normalization=softmax*n_levels",
+                    n_levels,
+                    self.gating_mode,
+                )
         # ===== [G1 끝] =====
 
         # logging
@@ -213,37 +277,56 @@ class INR(nn.Module):
             self.bounding_box[1, 2],
         )
 
-    def _apply_gating(self, pe: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _apply_gating(
+        self, pe: torch.Tensor, x: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """레벨별 softmax-normalized 가중치를 pe에 적용.
-        pe shape: (N, n_levels * n_features_per_level)
 
-        반환:
-            pe_gated : 가중치 적용 후 pe (동일 shape)
-            weights  : softmax(level_weights) * n_levels  shape: (n_levels,)
-                       train.py에서 diversity loss 계산에 사용
+        [G1 전역 모드]
+            pe shape : (N, n_levels * n_features_per_level)
+            반환 weights shape : (n_levels,)
+
+        [G6 공간 적응형 모드]
+            x shape  : (N, 3) 정규화 좌표, 필수
+            pe shape : (N, n_levels * n_features_per_level)
+            반환 weights shape : (N, n_levels)
+                → diversity loss 계산 시 .mean(0) 으로 레벨 축 평균 사용
         """
-        weights = F.softmax(self.level_weights, dim=0) * self.n_levels
-        pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
-        pe_gate = pe_gate * weights.view(1, self.n_levels, 1)
-        logging.debug(
-            "[G1] level_weights (softmax): %s",
-            [f"{v:.4f}" for v in weights.detach().cpu().tolist()],
-        )
+        if self.spatial_gating:
+            # [G6] 위치별 logits → softmax → 가중치
+            assert x is not None, "[G6] spatial_gating=True 이지만 x(좌표)가 전달되지 않았습니다."
+            logits = self.gating_net(x.float())          # (N, n_levels)
+            weights = F.softmax(logits, dim=-1) * self.n_levels  # (N, n_levels)
+            pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
+            pe_gate = pe_gate * weights.unsqueeze(-1)    # (N, n_levels, n_feat)
+            logging.debug(
+                "[G6] spatial weights mean per level: %s",
+                [f"{v:.4f}" for v in weights.detach().mean(0).cpu().tolist()],
+            )
+        else:
+            # [G1] 전역 level_weights
+            weights = F.softmax(self.level_weights, dim=0) * self.n_levels
+            pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
+            pe_gate = pe_gate * weights.view(1, self.n_levels, 1)
+            logging.debug(
+                "[G1] level_weights (softmax): %s",
+                [f"{v:.4f}" for v in weights.detach().cpu().tolist()],
+            )
         return pe_gate.view(-1, self.n_levels * self.n_features_per_level), weights
 
     def forward(self, x: torch.Tensor):
-        x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
-        prefix_shape = x.shape[:-1]
-        x = x.view(-1, x.shape[-1])
-        pe = self.encoding(x)
+        x_norm = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
+        prefix_shape = x_norm.shape[:-1]
+        x_flat = x_norm.view(-1, x_norm.shape[-1])
+        pe = self.encoding(x_flat)
         if not self.training:
-            pe = pe.to(dtype=x.dtype)
+            pe = pe.to(dtype=x_flat.dtype)
 
-        # ===== [G1] standard 모드: MSE + FF Loss gradient 모두 level_weights에 흔름 =====
+        # ===== [G1/G6] 게이팅 적용 =====
         gating_weights = None
         if self.use_gating:
-            pe, gating_weights = self._apply_gating(pe)
-        # ===== [G1 끝] =====
+            pe, gating_weights = self._apply_gating(pe, x_flat)
+        # ===== [G1/G6 끝] =====
 
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
@@ -256,19 +339,19 @@ class INR(nn.Module):
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """ff_direct 모드 전용 forward.
-        encoding은 detach → FF Loss gradient가 오직 level_weights로만 흐름.
+        encoding은 detach → FF Loss gradient가 오직 gating 파라미터로만 흐름.
         patch_forward에서만 호출됨.
         """
-        x = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
-        prefix_shape = x.shape[:-1]
-        x = x.view(-1, x.shape[-1])
+        x_norm = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
+        prefix_shape = x_norm.shape[:-1]
+        x_flat = x_norm.view(-1, x_norm.shape[-1])
         # ===== [G1_D] encoding detach =====
-        pe = self.encoding(x).detach()
+        pe = self.encoding(x_flat).detach()
         if not self.training:
-            pe = pe.to(dtype=x.dtype)
+            pe = pe.to(dtype=x_flat.dtype)
         gating_weights = None
         if self.use_gating:
-            pe, gating_weights = self._apply_gating(pe)
+            pe, gating_weights = self._apply_gating(pe, x_flat)
         # ===== [G1_D 끝] =====
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
