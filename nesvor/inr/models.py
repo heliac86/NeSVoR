@@ -139,6 +139,7 @@ class GatingMLP(nn.Module):
     공간 적응형 게이팅 네트워크.
 
     입력: 정규화된 3D 좌표 (N, 3), 범위 [0, 1]^3
+          N = 픽셀 수 (PSF 샘플 수가 아님 — 대표 좌표 1개/픽셀)
     출력: 위치별 level logits (N, n_levels)
           → _apply_gating 내에서 softmax * n_levels 를 거쳐 가중치로 변환
 
@@ -149,6 +150,14 @@ class GatingMLP(nn.Module):
     초기화: 마지막 레이어를 zeros 로 초기화
             → 학습 시작 시 모든 위치에서 softmax 출력이 균등 (1.0)
             → 기존 전역 level_weights=zeros 초기 상태와 동일
+
+    [G6 버그 수정] 대표 좌표 입력 원칙:
+        GatingMLP는 항상 픽셀당 대표 좌표 1개를 입력으로 받아야 함.
+        PSF Monte Carlo 샘플(n_samples=256개)을 각각 입력하면:
+          - GatingMLP가 픽셀당 256회 호출되어 연산량 256배 낭비
+          - gradient가 PSF 샘플 노이즈에 의해 오염되어 공간 패턴 학습 불가
+        올바른 흐름: x (N, n_samples, 3) → mean(dim=1) → (N, 3) → GatingMLP
+                     weights (N, n_levels) → repeat_interleave(n_samples) → pe 적용
     """
 
     def __init__(self, n_levels: int, hidden_dim: int = 32):
@@ -170,7 +179,7 @@ class GatingMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: (N, 3) 정규화 좌표
+        x: (N, 3) 정규화된 픽셀 대표 좌표 (PSF 샘플 평균 또는 중심 좌표)
         반환: (N, n_levels) logit
         """
         return self.net(x)
@@ -278,27 +287,43 @@ class INR(nn.Module):
         )
 
     def _apply_gating(
-        self, pe: torch.Tensor, x: Optional[torch.Tensor] = None
+        self,
+        pe: torch.Tensor,
+        x: Optional[torch.Tensor] = None,
+        n_samples: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """레벨별 softmax-normalized 가중치를 pe에 적용.
 
         [G1 전역 모드]
-            pe shape : (N, n_levels * n_features_per_level)
+            pe shape : (N, n_levels * n_features_per_level)  — N = 픽셀*n_samples
+            n_samples: 사용 안 함 (전역 weights는 확장 불필요)
             반환 weights shape : (n_levels,)
 
         [G6 공간 적응형 모드]
-            x shape  : (N, 3) 정규화 좌표, 필수
-            pe shape : (N, n_levels * n_features_per_level)
-            반환 weights shape : (N, n_levels)
+            x shape  : (N_px, 3) 픽셀 대표 정규화 좌표 (PSF 샘플 평균), 필수
+                        N_px = 픽셀 수 (n_samples 로 나눈 값)
+            pe shape : (N_px * n_samples, n_levels * n_features_per_level)
+            n_samples: PSF 샘플 수. weights (N_px, n_levels) →
+                       repeat_interleave(n_samples) → (N_px*n_samples, n_levels)
+            반환 weights shape : (N_px, n_levels)
                 → diversity loss 계산 시 .mean(0) 으로 레벨 축 평균 사용
         """
         if self.spatial_gating:
-            # [G6] 위치별 logits → softmax → 가중치
+            # [G6] 픽셀 대표 좌표 → logits → softmax → 가중치
             assert x is not None, "[G6] spatial_gating=True 이지만 x(좌표)가 전달되지 않았습니다."
-            logits = self.gating_net(x.float())          # (N, n_levels)
-            weights = F.softmax(logits, dim=-1) * self.n_levels  # (N, n_levels)
+            # x: (N_px, 3) — 픽셀당 대표 좌표 1개
+            logits = self.gating_net(x.float())                    # (N_px, n_levels)
+            weights = F.softmax(logits, dim=-1) * self.n_levels    # (N_px, n_levels)
+
+            if n_samples > 1:
+                # weights를 n_samples 만큼 반복 확장: (N_px, n_levels) → (N_px*n_samples, n_levels)
+                weights_expanded = weights.repeat_interleave(n_samples, dim=0)
+            else:
+                weights_expanded = weights
+
+            # pe: (N_px*n_samples, n_levels*n_feat)
             pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
-            pe_gate = pe_gate * weights.unsqueeze(-1)    # (N, n_levels, n_feat)
+            pe_gate = pe_gate * weights_expanded.unsqueeze(-1)     # (N_px*n_samples, n_levels, n_feat)
             logging.debug(
                 "[G6] spatial weights mean per level: %s",
                 [f"{v:.4f}" for v in weights.detach().mean(0).cpu().tolist()],
@@ -315,9 +340,10 @@ class INR(nn.Module):
         return pe_gate.view(-1, self.n_levels * self.n_features_per_level), weights
 
     def forward(self, x: torch.Tensor):
+        # x shape: (N, n_samples, 3) 또는 (N, 3)
         x_norm = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x_norm.shape[:-1]
-        x_flat = x_norm.view(-1, x_norm.shape[-1])
+        x_flat = x_norm.view(-1, x_norm.shape[-1])    # (N*n_samples, 3) 또는 (N, 3)
         pe = self.encoding(x_flat)
         if not self.training:
             pe = pe.to(dtype=x_flat.dtype)
@@ -325,7 +351,22 @@ class INR(nn.Module):
         # ===== [G1/G6] 게이팅 적용 =====
         gating_weights = None
         if self.use_gating:
-            pe, gating_weights = self._apply_gating(pe, x_flat)
+            if self.spatial_gating:
+                # [G6] 픽셀 대표 좌표 추출: PSF 샘플 차원을 평균내어 (N, 3) 확보
+                # x_norm이 (N, n_samples, 3)이면 n_samples 축 평균 → (N, 3)
+                # x_norm이 이미 (N, 3)이면 (추론 시 등) 그대로 사용
+                if x_norm.dim() == 3:
+                    # 학습 경로: (N, n_samples, 3) → (N, 3)
+                    x_repr = x_norm.mean(dim=1).float()
+                    n_samples = x_norm.shape[1]
+                else:
+                    # 추론 경로 또는 이미 flat: (N, 3) → 그대로
+                    x_repr = x_norm.float()
+                    n_samples = 1
+                pe, gating_weights = self._apply_gating(pe, x_repr, n_samples=n_samples)
+            else:
+                # [G1] 전역 gating: x 불필요
+                pe, gating_weights = self._apply_gating(pe)
         # ===== [G1/G6 끝] =====
 
         z = self.density_net(pe)
@@ -342,6 +383,7 @@ class INR(nn.Module):
         encoding은 detach → FF Loss gradient가 오직 gating 파라미터로만 흐름.
         patch_forward에서만 호출됨.
         """
+        # x shape: (N, n_samples, 3) 또는 (N, 3)
         x_norm = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x_norm.shape[:-1]
         x_flat = x_norm.view(-1, x_norm.shape[-1])
@@ -351,7 +393,17 @@ class INR(nn.Module):
             pe = pe.to(dtype=x_flat.dtype)
         gating_weights = None
         if self.use_gating:
-            pe, gating_weights = self._apply_gating(pe, x_flat)
+            if self.spatial_gating:
+                # [G6] 픽셀 대표 좌표 추출 (forward와 동일한 로직)
+                if x_norm.dim() == 3:
+                    x_repr = x_norm.mean(dim=1).float()
+                    n_samples = x_norm.shape[1]
+                else:
+                    x_repr = x_norm.float()
+                    n_samples = 1
+                pe, gating_weights = self._apply_gating(pe, x_repr, n_samples=n_samples)
+            else:
+                pe, gating_weights = self._apply_gating(pe)
         # ===== [G1_D 끝] =====
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
@@ -633,6 +685,9 @@ class NeSVoR(nn.Module):
         xyz_t = ax_transform_points(
             t, xyz_flat[:, None] + xyz_psf * psf_sigma, self.trans_first
         )
+        # xyz_t shape: (n*PP, n_samples, 3)
+        # INR.forward 내부에서 x_norm.dim()==3 을 감지하여
+        # G6 경로는 mean(dim=1)으로 대표 좌표를 추출함
 
         if self.args.deformable:
             de = self.deform_embedding(slice_idx_flat)[:, None].expand(
