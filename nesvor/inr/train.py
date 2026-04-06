@@ -3,6 +3,7 @@ from typing import List, Tuple
 import time
 import datetime
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 import logging
 from ..utils import MovingAverage, log_params, TrainLogger
@@ -148,6 +149,12 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     target_diversity_var = getattr(args, "target_diversity_var", 0.05)
     # gating grad clip (0 = 비활성화)
     gating_grad_clip = getattr(args, "gating_grad_clip", 0.0)
+    # ===== [B] diversity_loss_fn: 'variance' | 'entropy' | 'gini' =====
+    # variance (default, G5_lowvar 호환): relu(target - var)  → var을 높이는 방향
+    # entropy:                             relu(entropy - target) → entropy를 낮추는 방향 (분화)
+    # gini:                                relu(gini - target)    → gini를 낮추는 방향 (분화)
+    diversity_loss_fn = getattr(args, "diversity_loss_fn", "variance")
+    # ===== [B 끝] =====
 
     if spatial_gating and loss_weights[DIVERSITY_LOSS] > 0.0:
         logging.info(
@@ -159,9 +166,10 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     if use_diversity_loss:
         _level_weights_param = params_gating[0]
         logging.info(
-            "[G3] Diversity Loss enabled: weight=%.4f, space=%s, target_var=%.4f, grad_clip=%.2f",
+            "[G3/B] Diversity Loss enabled: weight=%.4f, space=%s, fn=%s, target_var=%.4f, grad_clip=%.2f",
             loss_weights[DIVERSITY_LOSS],
             diversity_loss_space,
+            diversity_loss_fn,
             target_diversity_var,
             gating_grad_clip,
         )
@@ -274,23 +282,42 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                     losses.update(patch_losses)
             # ===== [FF Loss 추가 끝] =====
 
-            # ===== [G3] Diversity Loss 계산 (soft target var) =====
+            # ===== [G3/B] Diversity Loss 계산 =====
             if use_diversity_loss:
-                if diversity_loss_space == "softmax":
-                    # softmax 출력 기준: 실제 gating에 사용되는 가중치의 분산
-                    # _apply_gating 내부 동일 연산: softmax(w) * n_levels
-                    import torch.nn.functional as F
-                    _softmax_weights = F.softmax(_level_weights_param, dim=0) * model.inr.n_levels
-                    _var_target = torch.var(_softmax_weights)
-                else:
-                    # raw logit 기준 (G3_softvar, 기본)
-                    _var_target = torch.var(_level_weights_param)
-                # relu: target_var 에 도달하면 loss=0, 미달 시에만 패널티
-                losses[DIVERSITY_LOSS] = torch.relu(
-                    torch.tensor(target_diversity_var, dtype=_var_target.dtype, device=_var_target.device)
-                    - _var_target
+                _target = torch.tensor(
+                    target_diversity_var,
+                    dtype=_level_weights_param.dtype,
+                    device=_level_weights_param.device,
                 )
-            # ===== [G3 끝] =====
+
+                if diversity_loss_fn == "entropy":
+                    # [B] softmax 훈 엔트로피 기준
+                    # entropy 최대 = 균등 분포 (= 분화 없음) → 낮이는 방향이 의도
+                    # relu(entropy - target): entropy > target 일 때만 패널티 부과
+                    _p = F.softmax(_level_weights_param, dim=0)
+                    _entropy = -(_p * (_p + 1e-8).log()).sum()
+                    losses[DIVERSITY_LOSS] = torch.relu(_entropy - _target)
+
+                elif diversity_loss_fn == "gini":
+                    # [B] softmax 훈 Gini 비순수 기준
+                    # gini 최대 = 균등 분포 (= 분화 없음) → 낮이는 방향이 의도
+                    # relu(gini - target): gini > target 일 때만 패널티 부과
+                    _p = F.softmax(_level_weights_param, dim=0)
+                    _gini = 1.0 - (_p ** 2).sum()
+                    losses[DIVERSITY_LOSS] = torch.relu(_gini - _target)
+
+                else:
+                    # [G3/G5_lowvar] variance 기준 (default, G5_lowvar 호환)
+                    # variance 높을수록 분화 우수 → 높이는 방향이 의도
+                    # relu(target - var): var < target 일 때만 패널티 부과
+                    if diversity_loss_space == "softmax":
+                        _w = F.softmax(_level_weights_param, dim=0) * model.inr.n_levels
+                        _var = torch.var(_w)
+                    else:
+                        # raw logit 기준 (G3_softvar 기본)
+                        _var = torch.var(_level_weights_param)
+                    losses[DIVERSITY_LOSS] = torch.relu(_target - _var)
+            # ===== [G3/B 끝] =====
 
             loss = 0
             for k in losses:
