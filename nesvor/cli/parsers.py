@@ -142,6 +142,20 @@ def build_parser_training() -> argparse.ArgumentParser:
             "Ignored when --spatial-gating is not set."
         ),
     )
+    # ===== [G7] z_repr 조건부 게이팅 인자 =====
+    parser.add_argument(
+        "--no-z-gating",
+        action="store_true",
+        help=(
+            "Disable z_repr input to GatingMLP (G7). "
+            "By default (when --spatial-gating is set and this flag is NOT set), "
+            "GatingMLP receives both 3D coordinates AND the density_net intermediate "
+            "feature z_repr as input, allowing content-aware gating. "
+            "Set this flag to revert to coordinate-only gating (G6 behaviour). "
+            "Ignored when --spatial-gating is not set."
+        ),
+    )
+    # ===== [G7 끝] =====
     # ===== [G6 끝] =====
     # ===== [G1 끝] =====
     parser = _parser.add_argument_group("model architecture (deformable part)")
@@ -328,6 +342,26 @@ def build_parser_training() -> argparse.ArgumentParser:
             "Ignored when --weight-diversity-loss is 0 or --no-gating is set."
         ),
     )
+    # ===== [G5/방향B] Diversity Loss 함수 선택 인자 =====
+    parser.add_argument(
+        "--diversity-loss-fn",
+        default="variance",
+        type=str,
+        choices=["variance", "entropy", "gini"],
+        help=(
+            "Diversity metric used for computing the Diversity Loss. "
+            "'variance' (default): penalizes low variance of level_weights. "
+            "  Loss = relu(target_var - var(weights)). G5_lowvar baseline. "
+            "'entropy' : penalizes high entropy (uniform distribution). "
+            "  Loss = relu(entropy(softmax(weights)) - target_var). "
+            "  Lower entropy => more differentiated levels. "
+            "'gini'    : penalizes high Gini impurity (uniform distribution). "
+            "  Loss = relu(gini(softmax(weights)) - target_var). "
+            "  Lower Gini => more concentrated/differentiated weights. "
+            "Ignored when --weight-diversity-loss is 0 or --no-gating is not set."
+        ),
+    )
+    # ===== [G5/방향B 끝] =====
     parser.add_argument(
         "--gating-grad-clip",
         default=0.0,
