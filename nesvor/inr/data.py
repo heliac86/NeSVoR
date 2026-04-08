@@ -28,9 +28,15 @@ class PointDataset(object):
         self.slice_resolution_xyz: List[torch.Tensor] = []
         # ===== [FF Loss 추가 끝] =====
 
+        # ===== [HM2] 슬라이스별 픽셀 인덱스 범위 저장 (get_batch hard mining용) =====
+        self._slice_pixel_ranges: List[tuple] = []  # (start, end) inclusive range per slice
+        # ===== [HM2 끝] =====
+
+        pixel_offset = 0
         for i, slice in enumerate(slices):
             xyz = slice.xyz_masked_untransformed
             v = slice.v_masked
+            n_pixels = v.shape[0]
             slice_idx = torch.full(v.shape, i, device=v.device)
             xyz_all.append(xyz)
             v_all.append(v)
@@ -45,6 +51,11 @@ class PointDataset(object):
             self.slice_resolution_xyz.append(slice.resolution_xyz.clone())
             # ===== [FF Loss 추가 끝] =====
 
+            # ===== [HM2] 픽셀 인덱스 범위 기록 =====
+            self._slice_pixel_ranges.append((pixel_offset, pixel_offset + n_pixels))
+            pixel_offset += n_pixels
+            # ===== [HM2 끝] =====
+
         self.xyz = torch.cat(xyz_all)
         self.v = torch.cat(v_all)
         self.slice_idx = torch.cat(slice_idx_all)
@@ -52,6 +63,12 @@ class PointDataset(object):
         self.resolution = torch.stack(resolution_all, 0)
         self.count = self.v.shape[0]
         self.epoch = 0
+
+        # ===== [HM2] 슬라이스별 픽셀 수 텐서 (가중 샘플링 계산용) =====
+        self._slice_pixel_counts = torch.tensor(
+            [e - s for s, e in self._slice_pixel_ranges], dtype=torch.float32
+        )
+        # ===== [HM2 끝] =====
 
     @property
     def n_slices(self) -> int:
@@ -84,14 +101,57 @@ class PointDataset(object):
         ]
     # ===== [k_norm 끝] =====
 
-    def get_batch(self, batch_size: int, device) -> Dict[str, torch.Tensor]:
+    def get_batch(
+        self,
+        batch_size: int,
+        device,
+        sampling_probs: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """메인 MSE 학습용 픽셀 배치 반환.
+
+        Args:
+            batch_size: 배치 크기.
+            device: 반환 텐서를 배치할 디바이스.
+            sampling_probs: 슬라이스별 샘플링 확률 (n_slices,) CPU 텐서.
+                None이면 기존 randperm 균등 셔플.
+                주어지면 에포크 경계마다 슬라이스 픽셀 수에 비례하여 가중
+                샘플링된 순서로 전체 풀을 재정렬 (Hard Slice Mining).
+        """
         if self.count + batch_size > self.xyz.shape[0]:
             self.count = 0
             self.epoch += 1
-            idx = torch.randperm(self.xyz.shape[0], device=device)
+
+            if sampling_probs is None:
+                # 기존 동작: 균등 무작위 셔플
+                idx = torch.randperm(self.xyz.shape[0], device=device)
+            else:
+                # ===== [HM2] 가중 샘플링: 슬라이스 잔차에 비례해 픽셀을 재정렬 =====
+                # 1) 슬라이스별 픽셀 가중치 = sampling_probs * n_pixels_in_slice
+                #    (슬라이스를 더 자주 보이되, 각 슬라이스 내부는 균등하게 커버)
+                pixel_weights = sampling_probs * self._slice_pixel_counts
+                pixel_weights = pixel_weights / pixel_weights.sum()
+
+                # 2) 슬라이스별 인덱스 블록을 가중치에 따라 multinomial 재정렬
+                #    전체 픽셀 수만큼 replacement=True로 샘플링 후 사용
+                #    (replacement=False는 수백만 원소에 느리므로 대신
+                #     슬라이스 단위 셔플 + 내부 randperm 조합 사용)
+                n_total = self.xyz.shape[0]
+                slice_order = torch.multinomial(
+                    pixel_weights, self.n_slices, replacement=False
+                )  # (n_slices,) 슬라이스 방문 순서
+
+                parts = []
+                for s in slice_order.tolist():
+                    start, end = self._slice_pixel_ranges[s]
+                    perm = torch.randperm(end - start, device=device) + start
+                    parts.append(perm)
+                idx = torch.cat(parts)  # 길이 = n_total (모든 픽셀 한 번씩)
+                # ===== [HM2 끝] =====
+
             self.xyz = self.xyz[idx]
             self.v = self.v[idx]
             self.slice_idx = self.slice_idx[idx]
+
         batch = {
             "xyz": self.xyz[self.count : self.count + batch_size],
             "v": self.v[self.count : self.count + batch_size],

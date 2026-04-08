@@ -212,6 +212,20 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     # ===== [Hard Slice Mining 끝] =====
 
     HARD_MINING_WARMUP = getattr(args, "hard_mining_warmup", 0)
+    # ===== [HM2] --hard-mining-main-loss 플래그: get_batch()에도 hard mining 적용 여부 =====
+    use_hard_mining_main_loss = getattr(args, "hard_mining_main_loss", False)
+    if use_hard_mining_main_loss:
+        logging.info(
+            "[HM2] Hard Mining for main MSE loss (get_batch) ENABLED. "
+            "Slice residuals will be used to weight pixel sampling after warmup."
+        )
+    else:
+        logging.info(
+            "[HM2] Hard Mining for main MSE loss (get_batch) DISABLED (default). "
+            "Use --hard-mining-main-loss to enable."
+        )
+    # ===== [HM2 끝] =====
+
     logging.info(
         "[E3] Hard Slice Mining warmup: %d iters (0 = immediate activation after first-batch init).",
         HARD_MINING_WARMUP,
@@ -239,8 +253,15 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             )
         # ===== [G3_warmup 끝] =====
 
+        # ===== [HM2] get_batch() 호출 시 sampling_probs 결정 =====
+        if use_hard_mining_main_loss and _residuals_initialized and i > HARD_MINING_WARMUP:
+            main_sampling_probs = slice_residuals / slice_residuals.sum()
+        else:
+            main_sampling_probs = None
+        # ===== [HM2 끝] =====
+
         # forward
-        batch = dataset.get_batch(args.batch_size, args.device)
+        batch = dataset.get_batch(args.batch_size, args.device, sampling_probs=main_sampling_probs)
         with torch.cuda.amp.autocast(fp16):
             losses = model(**batch)
 
