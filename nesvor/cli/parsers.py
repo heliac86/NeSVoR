@@ -358,7 +358,7 @@ def build_parser_training() -> argparse.ArgumentParser:
             "'gini'    : penalizes high Gini impurity (uniform distribution). "
             "  Loss = relu(gini(softmax(weights)) - target_var). "
             "  Lower Gini => more concentrated/differentiated weights. "
-            "Ignored when --weight-diversity-loss is 0 or --no-gating is not set."
+            "Ignored when --weight-diversity-loss is 0 or --no-gating is set."
         ),
     )
     # ===== [G5/방향B 끝] =====
@@ -434,6 +434,22 @@ def build_parser_training() -> argparse.ArgumentParser:
         action="store_true",
         help="use float32 training (default: float16/float32 mixed trainig)",
     )
+    # ===== [HM2] Hard Mining for main MSE loss =====
+    parser.add_argument(
+        "--hard-mining-main-loss",
+        action="store_true",
+        help=(
+            "Enable Hard Slice Mining for the main MSE loss (get_batch). "
+            "When set, slice sampling probabilities in each epoch reshuffle "
+            "are weighted by per-slice residual EMA, causing harder slices "
+            "(higher reconstruction error) to be seen more frequently. "
+            "By default (False), uniform random shuffling is used. "
+            "The FF Loss patch sampling (get_patch_batch) always uses hard mining "
+            "when slice residuals are available, regardless of this flag. "
+            "Requires slice_residuals to be initialized (after first iteration)."
+        ),
+    )
+    # ===== [HM2 끝] =====
     return _parser
 
 
