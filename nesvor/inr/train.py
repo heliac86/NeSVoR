@@ -163,8 +163,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             "Use spatial regularization instead if needed."
         )
 
+    # ===== [안전성 개선] diversity loss 파라미터: params_gating[0] 대신 model.inr.level_weights 직접 참조 =====
+    # params_gating[0]은 파라미터 등록 순서에 의존하므로, 나중에 코드가 변경되면
+    # 의도치 않은 파라미터를 참조할 수 있음. model.inr.level_weights를 직접 사용하면
+    # 항상 올바른 파라미터를 참조하며, 문제 발생 시 즉시 명시적 에러가 발생.
     if use_diversity_loss:
-        _level_weights_param = params_gating[0]
+        _level_weights_param = model.inr.level_weights
+        assert isinstance(_level_weights_param, torch.nn.Parameter), (
+            "[Diversity Loss] model.inr.level_weights가 nn.Parameter가 아닙니다. "
+            "--no-gating 여부 또는 --spatial-gating 설정을 확인하세요."
+        )
         logging.info(
             "[G3/B] Diversity Loss enabled: weight=%.4f, space=%s, fn=%s, target_var=%.4f, grad_clip=%.2f",
             loss_weights[DIVERSITY_LOSS],
@@ -173,7 +181,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             target_diversity_var,
             gating_grad_clip,
         )
-    # ===== [G3 끝] =====
+    # ===== [안전성 개선 끝] =====
 
     # ===== [G3_warmup] Density net warmup freeze 설정 =====
     gating_warmup_iters = 0
