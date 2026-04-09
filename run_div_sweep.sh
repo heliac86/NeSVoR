@@ -171,7 +171,7 @@ if [ "${ENABLE_G5_LOWVAR_S42}" -eq 1 ]; then
     for PATIENT in "${PATIENTS[@]}"; do
         for MODALITY in "${MODALITIES[@]}"; do
             run_case "G5_lowvar_s42" "${PATIENT}" "${MODALITY}" \
-                ${BASE_ARGS} \
+                ${BASE_ARGS}
         done
     done
 else
