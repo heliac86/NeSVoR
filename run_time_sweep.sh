@@ -261,7 +261,8 @@ if [ "${ENABLE_BA}" -eq 1 ]; then
                 ${BASE_ARGS} \
                 --n-iter 3000 \
                 --batch-size 8192 \
-                --learning-rate 1e-2
+                --learning-rate 1e-2 \
+                --inference-batch-size 16384
         done
     done
 else
@@ -290,7 +291,8 @@ if [ "${ENABLE_BB}" -eq 1 ]; then
                 ${BASE_ARGS} \
                 --n-iter 3000 \
                 --batch-size 8192 \
-                --learning-rate 5e-3
+                --learning-rate 5e-3 \
+                --inference-batch-size 16384
         done
     done
 else
