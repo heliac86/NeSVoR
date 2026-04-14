@@ -141,7 +141,7 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
 
     # csv에서 Brats20ID 칼럼 읽기 (헤더 제외)
     # 형식: BraTS20_Training_151 → PATIENT_ID=151
-    mapfile -t FULL_IDS < <(tail -n +2 "${TEST_CSV}" | cut -d',' -f1 | tr -d '[:space:]')
+    mapfile -t FULL_IDS < <(tail -n +2 "${TEST_CSV}" | cut -d',' -f1 | tr -d '\r')
 
     for FULL_ID in "${FULL_IDS[@]}"; do
         # BraTS20_Training_003 → PATIENT=003
