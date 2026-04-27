@@ -433,9 +433,13 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     import os
     import numpy as np
 
-    _analysis_dir = os.path.join(
-        getattr(args, "output_dir", "."), "slice_analysis"
-    )
+    # --output-volume 경로의 부모 디렉토리 아래에 slice_analysis/ 생성
+    _output_vol_path = getattr(args, "output_volume", None)
+    if _output_vol_path is not None:
+        _analysis_dir = os.path.join(os.path.dirname(_output_vol_path), "slice_analysis")
+    else:
+        _analysis_dir = os.path.join(".", "slice_analysis")
+
     os.makedirs(_analysis_dir, exist_ok=True)
 
     np.save(
