@@ -226,6 +226,13 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         )
     # ===== [HM2 끝] =====
 
+    # ===== [ANALYSIS] 슬라이스 분석용 데이터 수집 초기화 =====
+    slice_sample_counts_main  = torch.zeros(n_slices, dtype=torch.long)   # 메인 배치 샘플링 카운트
+    slice_sample_counts_patch = torch.zeros(n_slices, dtype=torch.long)   # 패치 샘플링 카운트
+    residuals_history = []   # (iter, slice_residuals 스냅샷) 리스트
+    RESIDUAL_SNAPSHOT_INTERVAL = max(1, args.n_iter // 10)  # 10회 스냅샷 (n_iter=2000이면 200마다)
+    # ===== [ANALYSIS 끝] =====
+
     logging.info(
         "[E3] Hard Slice Mining warmup: %d iters (0 = immediate activation after first-batch init).",
         HARD_MINING_WARMUP,
@@ -262,6 +269,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
         # forward
         batch = dataset.get_batch(args.batch_size, args.device, sampling_probs=main_sampling_probs)
+
+        # ===== [ANALYSIS] 메인 배치 슬라이스 샘플링 카운트 =====
+        with torch.no_grad():
+            for sidx in batch["slice_idx"].cpu().unique():
+                sidx_i = sidx.item()
+                slice_sample_counts_main[sidx_i] += (
+                    batch["slice_idx"].cpu() == sidx_i
+                ).sum().item()
+        # ===== [ANALYSIS 끝] =====
+        
         with torch.cuda.amp.autocast(fp16):
             losses = model(**batch)
 
@@ -309,7 +326,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                 if patch_batch:
                     patch_losses = model.patch_forward(**patch_batch)
                     losses.update(patch_losses)
+                    # ===== [ANALYSIS] 패치 샘플링 카운트 =====
+                    for sidx in patch_batch["slice_idx_patch"].cpu():
+                        slice_sample_counts_patch[sidx.item()] += 1
+                    # ===== [ANALYSIS 끝] =====
             # ===== [FF Loss 추가 끝] =====
+
+            # ===== [ANALYSIS] 잔차 EMA 시계열 스냅샷 =====
+            if _residuals_initialized and i % RESIDUAL_SNAPSHOT_INTERVAL == 0:
+                residuals_history.append((i, slice_residuals.clone().numpy()))
+            # ===== [ANALYSIS 끝] =====
 
             # ===== [G3/B] Diversity Loss 계산 =====
             if use_diversity_loss:
@@ -402,6 +428,46 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                     )
                 if i == args.n_iter:
                     logging.debug("Final scale of GradScaler = %f" % current_scaler)
+
+    # ===== [ANALYSIS] 슬라이스 분석 데이터 저장 =====
+    import os
+    import numpy as np
+
+    _analysis_dir = os.path.join(
+        getattr(args, "output_dir", "."), "slice_analysis"
+    )
+    os.makedirs(_analysis_dir, exist_ok=True)
+
+    np.save(
+        os.path.join(_analysis_dir, "slice_residuals_final.npy"),
+        slice_residuals.numpy(),
+    )
+    np.save(
+        os.path.join(_analysis_dir, "slice_sample_counts_main.npy"),
+        slice_sample_counts_main.numpy(),
+    )
+    np.save(
+        os.path.join(_analysis_dir, "slice_sample_counts_patch.npy"),
+        slice_sample_counts_patch.numpy(),
+    )
+    np.save(
+        os.path.join(_analysis_dir, "slice_pixel_counts.npy"),
+        dataset._slice_pixel_counts.numpy(),
+    )
+    if residuals_history:
+        iters_arr     = np.array([r[0] for r in residuals_history], dtype=np.int32)
+        residuals_arr = np.stack([r[1] for r in residuals_history], axis=0)
+        np.save(os.path.join(_analysis_dir, "residuals_history_iters.npy"),     iters_arr)
+        np.save(os.path.join(_analysis_dir, "residuals_history_values.npy"),    residuals_arr)
+
+    logging.info(
+        "[ANALYSIS] Slice analysis data saved to %s "
+        "(residuals_final, sample_counts_main, sample_counts_patch, "
+        "pixel_counts, residuals_history)",
+        _analysis_dir,
+    )
+    # ===== [ANALYSIS 끝] =====    
+
 
     # outputs
     transformation = model.transformation
