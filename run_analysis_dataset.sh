@@ -102,7 +102,9 @@ for FULL_ID in "${FULL_IDS[@]}"; do
         # train.py의 ANALYSIS 블록: os.path.dirname(args.output_volume) / slice_analysis/
 
         # 이미 완료된 케이스 스킵 (볼륨 + 모델 + slice_analysis 모두 존재 시)
-        ANALYSIS_DIR="${PATIENT_DIR}/slice_analysis"
+        FLAIR_ANALYSIS_DIR="${PATIENT_DIR}/${PATIENT}_flair_4x5_analysis_slice_analysis"
+        T1CE_ANALYSIS_DIR="${PATIENT_DIR}/${PATIENT}_t1ce_4x5_analysis_slice_analysis"
+        ANALYSIS_DIR="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_analysis_slice_analysis"
         if [ -f "${OUT_VOL}" ] && [ -f "${OUT_MODEL}" ] && [ -d "${ANALYSIS_DIR}" ]; then
             echo ""
             echo "  [SKIP] 이미 완료: ${PATIENT} / ${MODALITY}"
