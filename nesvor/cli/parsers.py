@@ -450,6 +450,17 @@ def build_parser_training() -> argparse.ArgumentParser:
         ),
     )
     # ===== [HM2 끝] =====
+
+    # ===== [Ablation] 아래 줄을 바로 뒤에 추가 =====
+    parser.add_argument(
+        "--no-hard-mining",
+        action="store_true",
+        default=False,
+        help="Disable Hard Slice Mining completely, including FF Loss patch sampling. "
+             "Used for ablation study (true no-HSM condition).",
+    )
+    # ===== [Ablation 끝] =====
+    
     return _parser
 
 
