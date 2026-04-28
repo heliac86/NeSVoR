@@ -450,7 +450,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     # --output-volume 경로의 부모 디렉토리 아래에 slice_analysis/ 생성
     _output_vol_path = getattr(args, "output_volume", None)
     if _output_vol_path is not None:
-        _analysis_dir = os.path.join(os.path.dirname(_output_vol_path), "slice_analysis")
+        # 003_flair_4x5_analysis.nii.gz → 003_flair_4x5_analysis
+        _vol_stem = os.path.basename(_output_vol_path)
+        for _ext in (".nii.gz", ".nii"):
+            if _vol_stem.endswith(_ext):
+                _vol_stem = _vol_stem[: -len(_ext)]
+                break
+        _analysis_dir = os.path.join(
+            os.path.dirname(_output_vol_path),
+            f"{_vol_stem}_slice_analysis",
+        )
     else:
         _analysis_dir = os.path.join(".", "slice_analysis")
 
