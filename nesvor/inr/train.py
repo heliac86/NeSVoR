@@ -222,7 +222,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             "(main loss sampling AND FF patch sampling both set to uniform)."
         )
     else:
-    use_hard_mining_main_loss = getattr(args, "hard_mining_main_loss", False)
+        use_hard_mining_main_loss = getattr(args, "hard_mining_main_loss", False)
     # ===== [Ablation 끝] =====
     if use_hard_mining_main_loss:
         logging.info(
