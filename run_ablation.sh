@@ -91,10 +91,11 @@ ARGS_no_ff="${BASE_ARGS_COMMON}
   --ff-alpha 2.0
 "
 
-# A2: w/o Hard Slice Mining — --hard-mining-main-loss 플래그 제거
+# A2: w/o Hard Slice Mining — --hard-mining-main-loss 플래그 제거 (완전한 no_hm)
 ARGS_no_hm="${BASE_ARGS_COMMON}
   --weight-ff-loss 0.05
   --ff-alpha 2.0
+  --no-hard-mining
 "
 
 # A3: w/o Gating — --no-gating 추가 (Diversity Loss는 자동 비활성화)
