@@ -213,7 +213,17 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
     HARD_MINING_WARMUP = getattr(args, "hard_mining_warmup", 0)
     # ===== [HM2] --hard-mining-main-loss 플래그: get_batch()에도 hard mining 적용 여부 =====
+    # ===== [Ablation] --no-hard-mining: HSM 완전 비활성화 플래그 =====
+    no_hard_mining = getattr(args, "no_hard_mining", False)
+    if no_hard_mining:
+        use_hard_mining_main_loss = False
+        logging.info(
+            "[Ablation] --no-hard-mining enabled: HSM fully disabled "
+            "(main loss sampling AND FF patch sampling both set to uniform)."
+        )
+    else:
     use_hard_mining_main_loss = getattr(args, "hard_mining_main_loss", False)
+    # ===== [Ablation 끝] =====
     if use_hard_mining_main_loss:
         logging.info(
             "[HM2] Hard Mining for main MSE loss (get_batch) ENABLED. "
@@ -315,10 +325,14 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
             # ===== [FF Loss 추가] 패치 배치 샘플링 및 patch_forward 호출 =====
             if use_ff_loss:
-                if i <= HARD_MINING_WARMUP or not _residuals_initialized:
+                # ===== [Ablation] no_hard_mining=True면 FF 패치 샘플링도 균등으로 강제 =====
+                if no_hard_mining:
+                    sampling_probs = None
+                elif i <= HARD_MINING_WARMUP or not _residuals_initialized:
                     sampling_probs = None
                 else:
                     sampling_probs = slice_residuals / slice_residuals.sum()
+                # ===== [Ablation 끝] =====
                 patch_batch = dataset.get_patch_batch(
                     n_patches, patch_size, args.device,
                     sampling_probs=sampling_probs,
