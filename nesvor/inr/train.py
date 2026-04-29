@@ -164,9 +164,6 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         )
 
     # ===== [안전성 개선] diversity loss 파라미터: params_gating[0] 대신 model.inr.level_weights 직접 참조 =====
-    # params_gating[0]은 파라미터 등록 순서에 의존하므로, 나중에 코드가 변경되면
-    # 의도치 않은 파라미터를 참조할 수 있음. model.inr.level_weights를 직접 사용하면
-    # 항상 올바른 파라미터를 참조하며, 문제 발생 시 즉시 명시적 에러가 발생.
     if use_diversity_loss:
         _level_weights_param = model.inr.level_weights
         assert isinstance(_level_weights_param, torch.nn.Parameter), (
@@ -202,17 +199,30 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     patch_size = getattr(args, "patch_size", 16)
     n_patches  = getattr(args, "n_patches",  8)
 
-    # ===== [Hard Slice Mining] 슬라이스별 MSE 잔차 EMA 초기화 =====
-    SLICE_RESIDUAL_EMA = 0.99
+    # ===== [Hard Slice Mining] EMA alpha 및 start iter 설정 =====
+    # --slice-residual-alpha : EMA 감쇠 계수. 작을수록 최근 잔차에 민감하게 반응.
+    #   분석 결과: alpha=0.99 + n_iter=2000 조합에서 슬라이스당 업데이트 ~20회
+    #   → 초기값 잔존율 82% → EMA가 실제 잔차를 반영 못 함
+    #   권장값: 0.9 (초기값 잔존율 ~12%로 대폭 개선)
+    SLICE_RESIDUAL_EMA = getattr(args, "slice_residual_alpha", 0.99)
+
+    # --hard-mining-start-iter : 이 iter 이전에는 HSM 비활성화 (균등 샘플링).
+    #   분석 결과: 잔차 분산이 iter ~1000 이후에야 진짜 차별화됨 (LR decay 0.5×n_iter)
+    #   → 초기 노이즈 구간에서 HSM 활성화 시 노이즈 추격 발생 (Spearman 음수)
+    #   권장값: int(0.5 * n_iter) — milestones 첫 번째 decay 직후
+    HARD_MINING_START_ITER = getattr(args, "hard_mining_start_iter", 0)
+
     n_slices = dataset.n_slices
     slice_residuals = torch.zeros(n_slices, dtype=torch.float32)
     slice_counts    = torch.zeros(n_slices, dtype=torch.long)
     _residuals_initialized = False
-    logging.info("[E3] slice_residuals will be initialized from first batch MSE (no warmup needed).")
+    logging.info(
+        "[HSM] slice_residual_alpha=%.3f, hard_mining_start_iter=%d",
+        SLICE_RESIDUAL_EMA,
+        HARD_MINING_START_ITER,
+    )
     # ===== [Hard Slice Mining 끝] =====
 
-    HARD_MINING_WARMUP = getattr(args, "hard_mining_warmup", 0)
-    # ===== [HM2] --hard-mining-main-loss 플래그: get_batch()에도 hard mining 적용 여부 =====
     # ===== [Ablation] --no-hard-mining: HSM 완전 비활성화 플래그 =====
     no_hard_mining = getattr(args, "no_hard_mining", False)
     if no_hard_mining:
@@ -224,10 +234,13 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     else:
         use_hard_mining_main_loss = getattr(args, "hard_mining_main_loss", False)
     # ===== [Ablation 끝] =====
+
+    # ===== [HM2] --hard-mining-main-loss 플래그 로그 =====
     if use_hard_mining_main_loss:
         logging.info(
             "[HM2] Hard Mining for main MSE loss (get_batch) ENABLED. "
-            "Slice residuals will be used to weight pixel sampling after warmup."
+            "Slice residuals will be used to weight pixel sampling after iter %d.",
+            HARD_MINING_START_ITER,
         )
     else:
         logging.info(
@@ -237,16 +250,11 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     # ===== [HM2 끝] =====
 
     # ===== [ANALYSIS] 슬라이스 분석용 데이터 수집 초기화 =====
-    slice_sample_counts_main  = torch.zeros(n_slices, dtype=torch.long)   # 메인 배치 샘플링 카운트
-    slice_sample_counts_patch = torch.zeros(n_slices, dtype=torch.long)   # 패치 샘플링 카운트
+    slice_sample_counts_main  = torch.zeros(n_slices, dtype=torch.long)
+    slice_sample_counts_patch = torch.zeros(n_slices, dtype=torch.long)
     residuals_history = []   # (iter, slice_residuals 스냅샷) 리스트
-    RESIDUAL_SNAPSHOT_INTERVAL = max(1, args.n_iter // 10)  # 10회 스냅샷 (n_iter=2000이면 200마다)
+    RESIDUAL_SNAPSHOT_INTERVAL = max(1, args.n_iter // 10)  # 10회 스냅샷
     # ===== [ANALYSIS 끝] =====
-
-    logging.info(
-        "[E3] Hard Slice Mining warmup: %d iters (0 = immediate activation after first-batch init).",
-        HARD_MINING_WARMUP,
-    )
 
     if use_ff_loss:
         logging.info(
@@ -271,7 +279,9 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         # ===== [G3_warmup 끝] =====
 
         # ===== [HM2] get_batch() 호출 시 sampling_probs 결정 =====
-        if use_hard_mining_main_loss and _residuals_initialized and i > HARD_MINING_WARMUP:
+        # hard_mining_start_iter 이전에는 균등 샘플링 강제
+        # → 초기 노이즈 구간에서 HSM이 노이즈를 추격하는 문제 방지
+        if use_hard_mining_main_loss and _residuals_initialized and i > HARD_MINING_START_ITER:
             main_sampling_probs = slice_residuals / slice_residuals.sum()
         else:
             main_sampling_probs = None
@@ -288,7 +298,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                     batch["slice_idx"].cpu() == sidx_i
                 ).sum().item()
         # ===== [ANALYSIS 끝] =====
-        
+
         with torch.cuda.amp.autocast(fp16):
             losses = model(**batch)
 
@@ -307,7 +317,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                         slice_residuals[~seen] = init_mean
                     _residuals_initialized = True
                     logging.info(
-                        "[E3] slice_residuals initialized from first batch. "
+                        "[HSM] slice_residuals initialized from first batch. "
                         "mean=%.6f, min=%.6f, max=%.6f",
                         slice_residuals.mean().item(),
                         slice_residuals.min().item(),
@@ -328,7 +338,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                 # ===== [Ablation] no_hard_mining=True면 FF 패치 샘플링도 균등으로 강제 =====
                 if no_hard_mining:
                     sampling_probs = None
-                elif i <= HARD_MINING_WARMUP or not _residuals_initialized:
+                elif i <= HARD_MINING_START_ITER or not _residuals_initialized:
                     sampling_probs = None
                 else:
                     sampling_probs = slice_residuals / slice_residuals.sum()
@@ -360,30 +370,20 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                 )
 
                 if diversity_loss_fn == "entropy":
-                    # [B] softmax 훈 엔트로피 기준
-                    # entropy 최대 = 균등 분포 (= 분화 없음) → 낮이는 방향이 의도
-                    # relu(entropy - target): entropy > target 일 때만 패널티 부과
                     _p = F.softmax(_level_weights_param, dim=0)
                     _entropy = -(_p * (_p + 1e-8).log()).sum()
                     losses[DIVERSITY_LOSS] = torch.relu(_entropy - _target)
 
                 elif diversity_loss_fn == "gini":
-                    # [B] softmax 훈 Gini 비순수 기준
-                    # gini 최대 = 균등 분포 (= 분화 없음) → 낮이는 방향이 의도
-                    # relu(gini - target): gini > target 일 때만 패널티 부과
                     _p = F.softmax(_level_weights_param, dim=0)
                     _gini = 1.0 - (_p ** 2).sum()
                     losses[DIVERSITY_LOSS] = torch.relu(_gini - _target)
 
                 else:
-                    # [G3/G5_lowvar] variance 기준 (default, G5_lowvar 호환)
-                    # variance 높을수록 분화 우수 → 높이는 방향이 의도
-                    # relu(target - var): var < target 일 때만 패널티 부과
                     if diversity_loss_space == "softmax":
                         _w = F.softmax(_level_weights_param, dim=0) * model.inr.n_levels
                         _var = torch.var(_w)
                     else:
-                        # raw logit 기준 (G3_softvar 기본)
                         _var = torch.var(_level_weights_param)
                     losses[DIVERSITY_LOSS] = torch.relu(_target - _var)
             # ===== [G3/B 끝] =====
@@ -447,10 +447,8 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     import os
     import numpy as np
 
-    # --output-volume 경로의 부모 디렉토리 아래에 slice_analysis/ 생성
     _output_vol_path = getattr(args, "output_volume", None)
     if _output_vol_path is not None:
-        # 003_flair_4x5_analysis.nii.gz → 003_flair_4x5_analysis
         _vol_stem = os.path.basename(_output_vol_path)
         for _ext in (".nii.gz", ".nii"):
             if _vol_stem.endswith(_ext):
@@ -465,27 +463,15 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
     os.makedirs(_analysis_dir, exist_ok=True)
 
-    np.save(
-        os.path.join(_analysis_dir, "slice_residuals_final.npy"),
-        slice_residuals.numpy(),
-    )
-    np.save(
-        os.path.join(_analysis_dir, "slice_sample_counts_main.npy"),
-        slice_sample_counts_main.numpy(),
-    )
-    np.save(
-        os.path.join(_analysis_dir, "slice_sample_counts_patch.npy"),
-        slice_sample_counts_patch.numpy(),
-    )
-    np.save(
-        os.path.join(_analysis_dir, "slice_pixel_counts.npy"),
-        dataset._slice_pixel_counts.numpy(),
-    )
+    np.save(os.path.join(_analysis_dir, "slice_residuals_final.npy"),      slice_residuals.numpy())
+    np.save(os.path.join(_analysis_dir, "slice_sample_counts_main.npy"),   slice_sample_counts_main.numpy())
+    np.save(os.path.join(_analysis_dir, "slice_sample_counts_patch.npy"),  slice_sample_counts_patch.numpy())
+    np.save(os.path.join(_analysis_dir, "slice_pixel_counts.npy"),         dataset._slice_pixel_counts.numpy())
     if residuals_history:
         iters_arr     = np.array([r[0] for r in residuals_history], dtype=np.int32)
         residuals_arr = np.stack([r[1] for r in residuals_history], axis=0)
-        np.save(os.path.join(_analysis_dir, "residuals_history_iters.npy"),     iters_arr)
-        np.save(os.path.join(_analysis_dir, "residuals_history_values.npy"),    residuals_arr)
+        np.save(os.path.join(_analysis_dir, "residuals_history_iters.npy"),  iters_arr)
+        np.save(os.path.join(_analysis_dir, "residuals_history_values.npy"), residuals_arr)
 
     logging.info(
         "[ANALYSIS] Slice analysis data saved to %s "
@@ -493,7 +479,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         "pixel_counts, residuals_history)",
         _analysis_dir,
     )
-    # ===== [ANALYSIS 끝] =====    
+    # ===== [ANALYSIS 끝] =====
 
 
     # outputs
