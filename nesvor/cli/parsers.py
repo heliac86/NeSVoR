@@ -450,8 +450,7 @@ def build_parser_training() -> argparse.ArgumentParser:
         ),
     )
     # ===== [HM2 끝] =====
-
-    # ===== [Ablation] 아래 줄을 바로 뒤에 추가 =====
+    # ===== [Ablation] --no-hard-mining =====
     parser.add_argument(
         "--no-hard-mining",
         action="store_true",
@@ -460,7 +459,37 @@ def build_parser_training() -> argparse.ArgumentParser:
              "Used for ablation study (true no-HSM condition).",
     )
     # ===== [Ablation 끝] =====
-    
+    # ===== [HSM-tune] EMA alpha 및 start iter 튜닝 인자 =====
+    parser.add_argument(
+        "--slice-residual-alpha",
+        default=0.99,
+        type=float,
+        help=(
+            "EMA decay coefficient for per-slice residual tracking in Hard Slice Mining. "
+            "Smaller values respond faster to recent reconstruction errors. "
+            "Analysis result: alpha=0.99 + n_iter=2000 yields only ~20 updates per slice, "
+            "leaving 82%% of the initial (noisy) value intact. "
+            "Recommended: 0.9 (reduces initial retention to ~12%%). "
+            "Default: 0.99 (legacy behaviour)."
+        ),
+    )
+    parser.add_argument(
+        "--hard-mining-start-iter",
+        default=0,
+        type=int,
+        help=(
+            "Iteration at which Hard Slice Mining is activated. "
+            "Before this iter, uniform slice sampling is used regardless of residuals. "
+            "Analysis result: residual variance does not differentiate hard/easy slices "
+            "until iter ~1000 (first LR decay at milestone 0.5 x n_iter). "
+            "Activating HSM earlier causes the EMA to chase noisy initial residuals, "
+            "resulting in negative Spearman correlation (wrong slices sampled more). "
+            "Recommended: int(0.5 * n_iter), e.g. 1000 for n_iter=2000. "
+            "Default: 0 (legacy behaviour, HSM active from the start)."
+        ),
+    )
+    # ===== [HSM-tune 끝] =====
+
     return _parser
 
 
