@@ -15,13 +15,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.font_manager as fm
 from scipy import stats
 from scipy.special import rel_entr   # KL-divergence
 
 # ══════════════════════════════════════════════════════════════
 # 설정
 # ══════════════════════════════════════════════════════════════
-RECON_ROOT  = "/dshome/ddualab/dongnyeok/NeSVoR/recon_analysis"
+# RECON_ROOT  = "/dshome/ddualab/dongnyeok/NeSVoR/recon_analysis"
+RECON_ROOT  = "/dshome/ddualab/dongnyeok/NeSVoR/recon_HSM_hsm_O"
 TEST_CSV    = "/dshome/ddualab/dongnyeok/NeSVoR/test.csv"
 OUT_DIR     = "./hsm_analysis_output"
 MODALITIES  = ["flair", "t1ce"]
@@ -31,12 +33,20 @@ N_ITER      = 2000
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
+font_path   = "/dshome/ddualab/dongnyeok/NanumGothic.ttf"
+fm.fontManager.addfont(font_path)
+font_name = fm.FontProperties(fname=font_path).get_name()
+
+plt.rc('font', family=font_name)
+plt.rcParams['axes.unicode_minus'] = False
+
 # ══════════════════════════════════════════════════════════════
 # 1. 데이터 로딩
 # ══════════════════════════════════════════════════════════════
 def load_case(patient_dir: str, patient_id: str, modality: str) -> Optional[dict]:
     """케이스 하나의 npy 파일을 모두 읽어 dict로 반환. 파일 누락 시 None."""
-    stem = f"{patient_id}_{modality}_4x5_analysis"
+    # stem = f"{patient_id}_{modality}_4x5_analysis"
+    stem = f"{patient_id}_{modality}_4x5_hsm_O"
     analysis_dir = os.path.join(patient_dir, f"{stem}_slice_analysis")
     if not os.path.isdir(analysis_dir):
         return None
