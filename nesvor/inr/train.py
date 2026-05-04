@@ -549,7 +549,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     np.save(os.path.join(_analysis_dir, "slice_loss_early_sum.npy"), slice_loss_early_sum.numpy())
     np.save(os.path.join(_analysis_dir, "slice_loss_late_sum.npy"),  slice_loss_late_sum.numpy())    
 
-logging.info(
+    logging.info(
         "[ANALYSIS] Slice analysis data saved to %s "
         "(residuals_final, sample_counts_main, sample_counts_patch, "
         "pixel_counts, residuals_history)",
