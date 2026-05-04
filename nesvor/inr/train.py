@@ -252,8 +252,30 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     # ===== [ANALYSIS] 슬라이스 분석용 데이터 수집 초기화 =====
     slice_sample_counts_main  = torch.zeros(n_slices, dtype=torch.long)
     slice_sample_counts_patch = torch.zeros(n_slices, dtype=torch.long)
-    residuals_history = []   # (iter, slice_residuals 스냅샷) 리스트
-    RESIDUAL_SNAPSHOT_INTERVAL = max(1, args.n_iter // 10)  # 10회 스냅샷
+    residuals_history = []
+
+    # ① 에포크 내 첫 등장 배치 위치 누적 (HM2 직접 증거)
+    slice_first_batch_pos_sum   = torch.zeros(n_slices, dtype=torch.float32)
+    slice_first_batch_pos_count = torch.zeros(n_slices, dtype=torch.long)
+
+    # ② 슬라이스별 Loss 기여량 누적
+    slice_loss_sum   = torch.zeros(n_slices, dtype=torch.float32)
+    slice_loss_count_arr = torch.zeros(n_slices, dtype=torch.long)
+
+    # ③ 에포크 전반/후반 Loss 기여 분리
+    slice_loss_early_sum = torch.zeros(n_slices, dtype=torch.float32)
+    slice_loss_late_sum  = torch.zeros(n_slices, dtype=torch.float32)
+
+    # ④ 스냅샷 스케줄 (초반 밀집)
+    snapshot_iters = set(
+        list(range(50, min(200, args.n_iter), 50)) +
+        list(range(200, args.n_iter + 1, 200))
+    )
+
+    # 에포크 내 배치 위치 추적용 내부 상태
+    _current_epoch_half_size = 0   # 에포크 절반 배치 수 (에포크 경계에서 갱신)
+    _batch_in_epoch = 0            # 에포크 내 현재 배치 번호
+    _epoch_id = -1                 # 직전 epoch 번호 (경계 감지용)
     # ===== [ANALYSIS 끝] =====
 
     if use_ff_loss:
@@ -290,13 +312,35 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         # forward
         batch = dataset.get_batch(args.batch_size, args.device, sampling_probs=main_sampling_probs)
 
-        # ===== [ANALYSIS] 메인 배치 슬라이스 샘플링 카운트 =====
+        # ===== [ANALYSIS] 메인 배치 슬라이스 샘플링 카운트 + 에포크 위치 추적 =====
         with torch.no_grad():
-            for sidx in batch["slice_idx"].cpu().unique():
+            _batch_slice_ids = batch["slice_idx"].cpu()
+
+            # 에포크 경계 감지
+            if dataset.epoch != _epoch_id:
+                _epoch_id = dataset.epoch
+                _batch_in_epoch = 0
+                # 에포크 전체 배치 수의 절반 (전반/후반 경계)
+                total_pixels = dataset.xyz.shape[0]
+                _current_epoch_half_size = max(1, (total_pixels // args.batch_size) // 2)
+
+            # 슬라이스별 픽셀 누적 카운트 (기존)
+            for sidx in _batch_slice_ids.unique():
                 sidx_i = sidx.item()
                 slice_sample_counts_main[sidx_i] += (
-                    batch["slice_idx"].cpu() == sidx_i
+                    _batch_slice_ids == sidx_i
                 ).sum().item()
+
+            # ① 에포크 내 첫 등장 배치 위치 기록
+            for sidx in _batch_slice_ids.unique():
+                sidx_i = sidx.item()
+                slice_first_batch_pos_sum[sidx_i]   += _batch_in_epoch
+                slice_first_batch_pos_count[sidx_i] += 1
+
+            # ③ 전반/후반 Loss 기여용 배치 위치 플래그
+            _is_early_batch = (_batch_in_epoch < _current_epoch_half_size)
+
+            _batch_in_epoch += 1
         # ===== [ANALYSIS 끝] =====
 
         with torch.cuda.amp.autocast(fp16):
@@ -331,6 +375,18 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                         SLICE_RESIDUAL_EMA * slice_residuals[si.item()]
                         + (1 - SLICE_RESIDUAL_EMA) * mean_mse
                     )
+                    # ② 슬라이스별 Loss 기여량 누적
+                    si_i = si.item()
+                    loss_pixels = pixel_mse_vals[mask].sum().item()
+                    loss_n      = mask.sum().item()
+                    slice_loss_sum[si_i]       += loss_pixels
+                    slice_loss_count_arr[si_i] += loss_n
+
+                    # ③ 전반/후반 분리 누적
+                    if _is_early_batch:
+                        slice_loss_early_sum[si_i] += loss_pixels
+                    else:
+                        slice_loss_late_sum[si_i]  += loss_pixels
             # ===== [Hard Slice Mining 끝] =====
 
             # ===== [FF Loss 추가] 패치 배치 샘플링 및 patch_forward 호출 =====
@@ -357,7 +413,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
             # ===== [FF Loss 추가 끝] =====
 
             # ===== [ANALYSIS] 잔차 EMA 시계열 스냅샷 =====
-            if _residuals_initialized and i % RESIDUAL_SNAPSHOT_INTERVAL == 0:
+            if _residuals_initialized and i in snapshot_iters:
                 residuals_history.append((i, slice_residuals.clone().numpy()))
             # ===== [ANALYSIS 끝] =====
 
@@ -473,7 +529,27 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         np.save(os.path.join(_analysis_dir, "residuals_history_iters.npy"),  iters_arr)
         np.save(os.path.join(_analysis_dir, "residuals_history_values.npy"), residuals_arr)
 
-    logging.info(
+    # ① 에포크 내 평균 첫 등장 배치 위치
+    avg_first_batch_pos = np.where(
+        slice_first_batch_pos_count.numpy() > 0,
+        slice_first_batch_pos_sum.numpy() / np.maximum(slice_first_batch_pos_count.numpy(), 1),
+        0.0,
+    )
+    np.save(os.path.join(_analysis_dir, "slice_avg_first_batch_pos.npy"), avg_first_batch_pos)
+
+    # ② 슬라이스별 평균 Loss 기여량
+    avg_loss_per_pixel = np.where(
+        slice_loss_count_arr.numpy() > 0,
+        slice_loss_sum.numpy() / np.maximum(slice_loss_count_arr.numpy(), 1),
+        0.0,
+    )
+    np.save(os.path.join(_analysis_dir, "slice_avg_loss_per_pixel.npy"), avg_loss_per_pixel)
+
+    # ③ 전반/후반 Loss 기여
+    np.save(os.path.join(_analysis_dir, "slice_loss_early_sum.npy"), slice_loss_early_sum.numpy())
+    np.save(os.path.join(_analysis_dir, "slice_loss_late_sum.npy"),  slice_loss_late_sum.numpy())    
+
+logging.info(
         "[ANALYSIS] Slice analysis data saved to %s "
         "(residuals_final, sample_counts_main, sample_counts_patch, "
         "pixel_counts, residuals_history)",
