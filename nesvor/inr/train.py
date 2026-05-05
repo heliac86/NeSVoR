@@ -200,16 +200,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     n_patches  = getattr(args, "n_patches",  8)
 
     # ===== [Hard Slice Mining] EMA alpha 및 start iter 설정 =====
-    # --slice-residual-alpha : EMA 감쇠 계수. 작을수록 최근 잔차에 민감하게 반응.
-    #   분석 결과: alpha=0.99 + n_iter=2000 조합에서 슬라이스당 업데이트 ~20회
-    #   → 초기값 잔존율 82% → EMA가 실제 잔차를 반영 못 함
-    #   권장값: 0.9 (초기값 잔존율 ~12%로 대폭 개선)
     SLICE_RESIDUAL_EMA = getattr(args, "slice_residual_alpha", 0.99)
-
-    # --hard-mining-start-iter : 이 iter 이전에는 HSM 비활성화 (균등 샘플링).
-    #   분석 결과: 잔차 분산이 iter ~1000 이후에야 진짜 차별화됨 (LR decay 0.5×n_iter)
-    #   → 초기 노이즈 구간에서 HSM 활성화 시 노이즈 추격 발생 (Spearman 음수)
-    #   권장값: int(0.5 * n_iter) — milestones 첫 번째 decay 직후
     HARD_MINING_START_ITER = getattr(args, "hard_mining_start_iter", 0)
 
     n_slices = dataset.n_slices
@@ -238,7 +229,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
     # ===== [HM2] --hard-mining-main-loss 플래그 로그 =====
     if use_hard_mining_main_loss:
         logging.info(
-            "[HM2] Hard Mining for main MSE loss (get_batch) ENABLED. "
+            "[HM2] Hard Mining for main MSE loss (get_batch) ENABLED (Option A: per-batch multinomial). "
             "Slice residuals will be used to weight pixel sampling after iter %d.",
             HARD_MINING_START_ITER,
         )
@@ -272,11 +263,16 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         list(range(200, args.n_iter + 1, 200))
     )
 
-    # 에포크 내 배치 위치 추적용 내부 상태
-    _current_epoch_half_size = 0   # 에포크 절반 배치 수 (에포크 경계에서 갱신)
-    _batch_in_epoch = 0            # 에포크 내 현재 배치 번호
-    _epoch_id = -1                 # 직전 epoch 번호 (경계 감지용)
-    # ===== [ANALYSIS 끝] =====
+    # ===== [Option A 호환] 가상 에포크 카운터 =====
+    # dataset.epoch 은 Option A(per-batch multinomial) 활성화 시 갱신되지 않음.
+    # iter 기반 _virtual_epoch 으로 에포크 경계를 독립적으로 추적.
+    # 균등 모드에서는 dataset.epoch 과 거의 동일하게 움직임.
+    _total_pixels = dataset.xyz.shape[0]
+    _batches_per_epoch = max(1, _total_pixels // args.batch_size)
+    _current_epoch_half_size = max(1, _batches_per_epoch // 2)  # 루프 진입 전 1회 계산
+    _batch_in_epoch = 0   # 가상 에포크 내 현재 배치 번호
+    _epoch_id = -1        # 직전 가상 에포크 번호 (경계 감지용)
+    # ===== [Option A 호환 끝] =====
 
     if use_ff_loss:
         logging.info(
@@ -301,8 +297,6 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         # ===== [G3_warmup 끝] =====
 
         # ===== [HM2] get_batch() 호출 시 sampling_probs 결정 =====
-        # hard_mining_start_iter 이전에는 균등 샘플링 강제
-        # → 초기 노이즈 구간에서 HSM이 노이즈를 추격하는 문제 방지
         if use_hard_mining_main_loss and _residuals_initialized and i > HARD_MINING_START_ITER:
             main_sampling_probs = slice_residuals / slice_residuals.sum()
         else:
@@ -316,15 +310,15 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         with torch.no_grad():
             _batch_slice_ids = batch["slice_idx"].cpu()
 
-            # 에포크 경계 감지
-            if dataset.epoch != _epoch_id:
-                _epoch_id = dataset.epoch
+            # ===== [Option A 호환] iter 기반 가상 에포크 경계 감지 =====
+            # (i-1) // _batches_per_epoch : 0-based iter → 가상 에포크 번호
+            _virtual_epoch = (i - 1) // _batches_per_epoch
+            if _virtual_epoch != _epoch_id:
+                _epoch_id = _virtual_epoch
                 _batch_in_epoch = 0
-                # 에포크 전체 배치 수의 절반 (전반/후반 경계)
-                total_pixels = dataset.xyz.shape[0]
-                _current_epoch_half_size = max(1, (total_pixels // args.batch_size) // 2)
+            # ===== [Option A 호환 끝] =====
 
-            # 슬라이스별 픽셀 누적 카운트 (기존)
+            # 슬라이스별 픽셀 누적 카운트
             for sidx in _batch_slice_ids.unique():
                 sidx_i = sidx.item()
                 slice_sample_counts_main[sidx_i] += (
@@ -479,7 +473,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
                 logging_header = True
             train_logger.log(
                 datetime.timedelta(seconds=int(train_time)),
-                dataset.epoch,
+                _virtual_epoch,  # dataset.epoch 대신 가상 에포크 사용
                 i,
                 *[average[k] for k in losses],
                 optimizer.param_groups[0]["lr"],
@@ -547,7 +541,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
     # ③ 전반/후반 Loss 기여
     np.save(os.path.join(_analysis_dir, "slice_loss_early_sum.npy"), slice_loss_early_sum.numpy())
-    np.save(os.path.join(_analysis_dir, "slice_loss_late_sum.npy"),  slice_loss_late_sum.numpy())    
+    np.save(os.path.join(_analysis_dir, "slice_loss_late_sum.npy"),  slice_loss_late_sum.numpy())
 
     logging.info(
         "[ANALYSIS] Slice analysis data saved to %s "
