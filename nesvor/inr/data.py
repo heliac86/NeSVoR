@@ -61,7 +61,7 @@ class PointDataset(object):
         self.slice_idx = torch.cat(slice_idx_all)
         self.transformation = RigidTransform.cat(transformation_all)
         self.resolution = torch.stack(resolution_all, 0)
-        self.count = self.v.shape[0]  # 첫 호출에서 즉시 셔플 트리거
+        self.count = self.v.shape[0]
         self.epoch = 0
 
         # ===== [HM2] 슬라이스별 픽셀 수 텐서 (가중 샘플링 계산용) =====
@@ -69,26 +69,6 @@ class PointDataset(object):
             [e - s for s, e in self._slice_pixel_ranges], dtype=torch.float32
         )
         # ===== [HM2 끝] =====
-
-        # ===== [Option A] GPU 캐시용 텐서 (get_batch 가중 샘플링 경로) =====
-        # slice_starts / slice_sizes 는 배치마다 참조되므로 미리 생성해 둠.
-        # 실제 device 이동은 get_batch() 첫 호출 시 lazy하게 수행.
-        self._slice_starts: Optional[torch.Tensor] = None  # (n_slices,) long
-        self._slice_sizes:  Optional[torch.Tensor] = None  # (n_slices,) float
-        self._cached_device = None
-        # ===== [Option A 끝] =====
-
-    # ===== [Option A] 슬라이스 범위 텐서 lazy 초기화 =====
-    def _ensure_slice_tensors(self, device) -> None:
-        """slice_starts / slice_sizes 를 device 에 올려 둔다. 첫 호출 시 1회만 실행."""
-        if self._cached_device != device:
-            self._slice_starts = torch.tensor(
-                [s for s, _ in self._slice_pixel_ranges],
-                dtype=torch.long, device=device,
-            )
-            self._slice_sizes = self._slice_pixel_counts.to(device)
-            self._cached_device = device
-    # ===== [Option A 끝] =====
 
     @property
     def n_slices(self) -> int:
@@ -133,56 +113,52 @@ class PointDataset(object):
             batch_size: 배치 크기.
             device: 반환 텐서를 배치할 디바이스.
             sampling_probs: 슬라이스별 샘플링 확률 (n_slices,) CPU 텐서.
-                None이면 기존 randperm 균등 셔플 (hsm_O 동작 완전 보존).
-                주어지면 [Option A] 배치마다 multinomial로 슬라이스를 가중
-                샘플링하고 각 슬라이스 내에서 픽셀을 균등 랜덤 선택.
-                → 잔차 높은 슬라이스에서 실제로 더 높은 빈도로 픽셀이 뽑힘.
+                None이면 기존 randperm 균등 셔플.
+                주어지면 에포크 경계마다 슬라이스 픽셀 수에 비례하여 가중
+                샘플링된 순서로 전체 풀을 재정렬 (Hard Slice Mining).
         """
-        # ===== [Option A] 가중 샘플링 경로 =====
-        if sampling_probs is not None:
-            self._ensure_slice_tensors(device)
-
-            # 슬라이스별 픽셀 가중치 = sampling_probs * n_pixels_in_slice
-            # (잔차가 높고 픽셀 수도 많은 슬라이스를 더 자주 방문)
-            pixel_weights = sampling_probs.to(device) * self._slice_sizes
-            pixel_weights = pixel_weights / pixel_weights.sum()
-
-            # 1) batch_size 개의 슬라이스를 가중 샘플링 (replacement=True)
-            sampled_slices = torch.multinomial(
-                pixel_weights, batch_size, replacement=True
-            )  # (batch_size,) — 각 원소는 슬라이스 인덱스
-
-            # 2) 각 슬라이스에서 픽셀 1개를 균등 랜덤 선택 (벡터화)
-            offsets = (
-                torch.rand(batch_size, device=device)
-                * self._slice_sizes[sampled_slices]
-            ).long()
-            sampled_pixels = self._slice_starts[sampled_slices] + offsets
-
-            return {
-                "xyz":       self.xyz[sampled_pixels].to(device),
-                "v":         self.v[sampled_pixels].to(device),
-                "slice_idx": sampled_slices,  # 이미 올바른 슬라이스 인덱스
-            }
-        # ===== [Option A 끝] =====
-
-        # ===== 균등 모드: 기존 에포크-셔플 로직 완전 보존 (hsm_O 재현성) =====
         if self.count + batch_size > self.xyz.shape[0]:
             self.count = 0
             self.epoch += 1
-            idx = torch.randperm(self.xyz.shape[0], device=device)
+
+            if sampling_probs is None:
+                # 기존 동작: 균등 무작위 셔플
+                idx = torch.randperm(self.xyz.shape[0], device=device)
+            else:
+                # ===== [HM2] 가중 샘플링: 슬라이스 잔차에 비례해 픽셀을 재정렬 =====
+                # 1) 슬라이스별 픽셀 가중치 = sampling_probs * n_pixels_in_slice
+                #    (슬라이스를 더 자주 보이되, 각 슬라이스 내부는 균등하게 커버)
+                pixel_weights = sampling_probs * self._slice_pixel_counts
+                pixel_weights = pixel_weights / pixel_weights.sum()
+
+                # 2) 슬라이스별 인덱스 블록을 가중치에 따라 multinomial 재정렬
+                #    전체 픽셀 수만큼 replacement=True로 샘플링 후 사용
+                #    (replacement=False는 수백만 원소에 느리므로 대신
+                #     슬라이스 단위 셔플 + 내부 randperm 조합 사용)
+                n_total = self.xyz.shape[0]
+                slice_order = torch.multinomial(
+                    pixel_weights, self.n_slices, replacement=False
+                )  # (n_slices,) 슬라이스 방문 순서
+
+                parts = []
+                for s in slice_order.tolist():
+                    start, end = self._slice_pixel_ranges[s]
+                    perm = torch.randperm(end - start, device=device) + start
+                    parts.append(perm)
+                idx = torch.cat(parts)  # 길이 = n_total (모든 픽셀 한 번씩)
+                # ===== [HM2 끝] =====
+
             self.xyz = self.xyz[idx]
             self.v = self.v[idx]
             self.slice_idx = self.slice_idx[idx]
 
         batch = {
             "xyz": self.xyz[self.count : self.count + batch_size],
-            "v":   self.v[self.count : self.count + batch_size],
+            "v": self.v[self.count : self.count + batch_size],
             "slice_idx": self.slice_idx[self.count : self.count + batch_size],
         }
         self.count += batch_size
         return batch
-        # ===== 균등 모드 끝 =====
 
     # ===== [FF Loss 추가] 패치 단위 샘플링 메서드 =====
     def get_patch_batch(
