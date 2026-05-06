@@ -128,8 +128,10 @@ class PointDataset(object):
                 # ===== [HM2] 가중 샘플링: 슬라이스 잔차에 비례해 픽셀을 재정렬 =====
                 # 1) 슬라이스별 픽셀 가중치 = sampling_probs * n_pixels_in_slice
                 #    (슬라이스를 더 자주 보이되, 각 슬라이스 내부는 균등하게 커버)
-                pixel_weights = sampling_probs * self._slice_pixel_counts
-                pixel_weights = pixel_weights / pixel_weights.sum()
+                uniform_w = self._slice_pixel_counts / self._slice_pixel_counts.sum()
+                hsm_w     = sampling_probs * self._slice_pixel_counts
+                hsm_w     = hsm_w / hsm_w.sum()
+                pixel_weights = (1 - beta) * uniform_w + beta * hsm_w
 
                 # 2) 슬라이스별 인덱스 블록을 가중치에 따라 multinomial 재정렬
                 #    전체 픽셀 수만큼 replacement=True로 샘플링 후 사용
