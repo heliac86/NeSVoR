@@ -132,7 +132,7 @@ class PointDataset(object):
                 uniform_w = self._slice_pixel_counts / self._slice_pixel_counts.sum()
                 hsm_w     = sampling_probs * self._slice_pixel_counts
                 hsm_w     = hsm_w / hsm_w.sum()
-                pixel_weights = (1 - beta) * uniform_w + beta * hsm_w
+                pixel_weights = (1 - hsm_beta) * uniform_w + hsm_beta * hsm_w
 
                 # 2) 슬라이스별 인덱스 블록을 가중치에 따라 multinomial 재정렬
                 #    전체 픽셀 수만큼 replacement=True로 샘플링 후 사용
