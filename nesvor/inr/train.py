@@ -310,7 +310,11 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         # ===== [HM2 끝] =====
 
         # forward
-        batch = dataset.get_batch(args.batch_size, args.device, sampling_probs=main_sampling_probs)
+        batch = dataset.get_batch(
+            args.batch_size, args.device,
+            sampling_probs=main_sampling_probs,
+            hsm_beta=getattr(args, "hsm_beta", 1.0),
+        )
 
         # ===== [ANALYSIS] 메인 배치 슬라이스 샘플링 카운트 + 에포크 위치 추적 =====
         with torch.no_grad():
