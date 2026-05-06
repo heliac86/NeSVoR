@@ -106,6 +106,7 @@ class PointDataset(object):
         batch_size: int,
         device,
         sampling_probs: Optional[torch.Tensor] = None,
+        hsm_beta=1.0
     ) -> Dict[str, torch.Tensor]:
         """메인 MSE 학습용 픽셀 배치 반환.
 
