@@ -488,6 +488,10 @@ def build_parser_training() -> argparse.ArgumentParser:
             "Default: 0 (legacy behaviour, HSM active from the start)."
         ),
     )
+
+    parser.add_argument("--hsm-beta", type=float, default=1.0,
+        help="Soft reweighting mix ratio for HSM (0=uniform, 1=pure HSM). Default: 1.0")
+    
     # ===== [HSM-tune 끝] =====
 
     return _parser
