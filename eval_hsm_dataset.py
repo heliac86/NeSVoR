@@ -21,15 +21,22 @@ RECON_BASE = "/dshome/ddualab/dongnyeok/NeSVoR"
 
 ev.METHODS = {
     "IC"    : f"{RECON_BASE}/recon_IC",
-    "hsm_I" : f"{RECON_BASE}/recon_HSM_hsm_I",
-    "hsm_M" : f"{RECON_BASE}/recon_HSM_hsm_M",
-    "hsm_L" : f"{RECON_BASE}/recon_HSM_hsm_L",
-    "hsm_N" : f"{RECON_BASE}/recon_HSM_hsm_N",
+    # "hsm_I" : f"{RECON_BASE}/recon_HSM_hsm_I",
+    # "hsm_M" : f"{RECON_BASE}/recon_HSM_hsm_M",
+    # "hsm_L" : f"{RECON_BASE}/recon_HSM_hsm_L",
+    # "hsm_N" : f"{RECON_BASE}/recon_HSM_hsm_N",
     "hsm_O" : f"{RECON_BASE}/recon_HSM_hsm_O",
-    "hsm_P" : f"{RECON_BASE}/recon_HSM_hsm_P",
+    # "hsm_P" : f"{RECON_BASE}/recon_HSM_hsm_P",
+    # "optB_A" : f"{RECON_BASE}/recon_HSM_optB_A",
+    # "optB_B" : f"{RECON_BASE}/recon_HSM_optB_B",
+    # "optB_C" : f"{RECON_BASE}/recon_HSM_optB_C", 
+    "optC_A" : f"{RECON_BASE}/recon_HSM_optC_A",
+    "optC_B" : f"{RECON_BASE}/recon_HSM_optC_B",
+    "optC_C" : f"{RECON_BASE}/recon_HSM_optC_C",    
+    "optC_D" : f"{RECON_BASE}/recon_HSM_optC_D",  
 }
 
-ev.RESULT_CSV = "/dshome/ddualab/dongnyeok/eval_results/eval_hsm_dataset.csv"
+ev.RESULT_CSV = "/dshome/ddualab/dongnyeok/eval_results/eval_hsm_dataset_optC.csv"
 
 # ── 실행 ──────────────────────────────────────────────────────
 if __name__ == "__main__":
