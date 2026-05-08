@@ -214,7 +214,7 @@ fi
 if [ "${ENABLE_OPT_D}" -eq 1 ]; then
     run_dataset_set "optC_D" "0.8"
 else
-    echo "  [SKIP] optC_D (ENABLE_OPT_C=0)"
+    echo "  [SKIP] optC_D (ENABLE_OPT_D=0)"
 fi
 
 # ================================================================
