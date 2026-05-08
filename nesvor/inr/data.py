@@ -139,16 +139,22 @@ class PointDataset(object):
                 #    (replacement=False는 수백만 원소에 느리므로 대신
                 #     슬라이스 단위 셔플 + 내부 randperm 조합 사용)
                 n_total = self.xyz.shape[0]
-                slice_order = torch.multinomial(
-                    pixel_weights, self.n_slices, replacement=False
-                )  # (n_slices,) 슬라이스 방문 순서
+                # 슬라이스별 할당 픽셀 수 계산
+                target_counts = (pixel_weights * n_total).round().long()
+                # 반올림 오차 보정: 차이를 가중치가 가장 높은 슬라이스에 몰아줌
+                diff = int(n_total - target_counts.sum().item())
+                target_counts[int(pixel_weights.argmax().item())] += diff
 
                 parts = []
-                for s in slice_order.tolist():
+                for s in range(self.n_slices):
                     start, end = self._slice_pixel_ranges[s]
-                    perm = torch.randperm(end - start, device=device) + start
+                    n_sample = int(target_counts[s].item())
+                    if n_sample <= 0:
+                        continue
+                    # replacement=True: 잔차 높은 슬라이스는 n_sample > n_available 가능
+                    perm = torch.randint(start, end, (n_sample,), device=device)
                     parts.append(perm)
-                idx = torch.cat(parts)  # 길이 = n_total (모든 픽셀 한 번씩)
+                idx = torch.cat(parts)  # 길이 = n_total
                 # ===== [HM2 끝] =====
 
             self.xyz = self.xyz[idx]
