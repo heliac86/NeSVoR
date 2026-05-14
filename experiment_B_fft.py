@@ -147,12 +147,34 @@ def bandpass_filter_3d(volume, f_lo, f_hi, freq_grid, sigma_ratio=0.3):
     return filtered.astype(np.float32)
 
 
-def band_rmse(orig, recon, freq_grid, f_lo, f_hi):
-    """특정 주파수 밴드에서의 RMSE (brain mask 불필요 — 주파수 도메인 비교)"""
-    orig_band  = bandpass_filter_3d(orig,  f_lo, f_hi, freq_grid)
-    recon_band = bandpass_filter_3d(recon, f_lo, f_hi, freq_grid)
-    diff = orig_band - recon_band
-    return float(np.sqrt(np.mean(diff**2)))
+def compute_all_band_rmse(gt_norm, recon_norm, freq_grid):
+    """
+    FFT를 각 1회만 수행 후 7밴드 RMSE 일괄 계산
+    반환: list of float (len=N_BANDS)
+    """
+    F_gt    = np.fft.fftn(gt_norm)
+    F_recon = np.fft.fftn(recon_norm)
+    
+    results = []
+    for band in BANDS:
+        f_lo, f_hi = band["f_lo"], band["f_hi"]
+        bw    = f_hi - f_lo
+        sigma = max(bw * 0.3, 0.005)
+        
+        if f_lo <= 0.0:
+            H = 1.0 - 0.5 * (1.0 + np.tanh((freq_grid - f_hi) / sigma))
+        elif f_hi >= 0.499:
+            H = 0.5 * (1.0 + np.tanh((freq_grid - f_lo) / sigma))
+        else:
+            H_hi = 1.0 - 0.5 * (1.0 + np.tanh((freq_grid - f_hi) / sigma))
+            H_lo = 0.5 * (1.0 + np.tanh((freq_grid - f_lo) / sigma))
+            H    = H_lo * H_hi
+        
+        gt_band    = np.real(np.fft.ifftn(F_gt    * H)).astype(np.float32)
+        recon_band = np.real(np.fft.ifftn(F_recon * H)).astype(np.float32)
+        results.append(float(np.sqrt(np.mean((gt_band - recon_band)**2))))
+    
+    return results
 
 # ================================================================
 # 메인 루프
@@ -218,10 +240,9 @@ for full_id in full_ids:
 
         # ── 밴드별 RMSE 계산 ─────────────────────────────────────
         rec = {"patient": short_id, "full_id": full_id, "modality": mod}
-        for i, band in enumerate(BANDS):
-            f_lo, f_hi = band["f_lo"], band["f_hi"]
-            for cond_name, cond_arr in conditions.items():
-                rmse = band_rmse(gt_norm, cond_arr, freq_grid, f_lo, f_hi)
+        for cond_name, cond_arr in conditions.items():
+            band_rmses = compute_all_band_rmse(gt_norm, cond_arr, freq_grid)
+            for i, rmse in enumerate(band_rmses):
                 rec[f"B{i+1}_{cond_name}"] = rmse
 
         records.append(rec)
