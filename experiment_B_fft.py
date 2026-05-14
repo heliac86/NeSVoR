@@ -159,7 +159,7 @@ def band_rmse(orig, recon, freq_grid, f_lo, f_hi):
 # ================================================================
 records = []
 
-full_ids = pd.read_csv(TEST_CSV)["patient_id"].tolist()   # 컬럼명 확인 필요
+full_ids = pd.read_csv(TEST_CSV)["Brats20ID"].tolist()   # 컬럼명 확인 필요
 print(f"총 케이스: {len(full_ids)} × {len(MODALITIES)} = {len(full_ids)*len(MODALITIES)}")
 
 for full_id in full_ids:
