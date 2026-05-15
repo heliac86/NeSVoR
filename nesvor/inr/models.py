@@ -240,7 +240,11 @@ class INR(nn.Module):
 
         # ===== [G1] Softmax-normalized Gating =====
         self.use_gating = not getattr(args, "no_gating", False)
-        self.gating_mode = getattr(args, "gating_mode", "standard")
+        # [exp_P] ff_direct를 기본값으로 설정:
+        #   - use_gating=True  → forward_ff_direct 경유, level_weights는 ff_loss gradient 수신
+        #   - use_gating=False → forward_ff_direct 경유, encoding detach, gating 없음
+        #   명시적으로 "standard"를 전달해야만 G1(기존) 동작으로 복귀
+        self.gating_mode = getattr(args, "gating_mode", "ff_direct")
 
         # ===== [G6] 공간 적응형 게이팅 여부 =====
         self.spatial_gating = (
@@ -441,13 +445,14 @@ class INR(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """ff_direct 모드 전용 forward.
         encoding은 detach → FF Loss gradient가 오직 gating 파라미터로만 흐름.
+        use_gating=False(no_gating)일 때도 이 경로를 탐 → ff_loss가 density_net만 업데이트.
         patch_forward에서만 호출됨.
         """
         # x shape: (N, n_samples, 3) 또는 (N, 3)
         x_norm = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x_norm.shape[:-1]
         x_flat = x_norm.view(-1, x_norm.shape[-1])
-        # ===== [G1_D] encoding detach =====
+        # ===== [G1_D / exp_P] encoding detach =====
         pe = self.encoding(x_flat).detach()
         if not self.training:
             pe = pe.to(dtype=x_flat.dtype)
@@ -471,7 +476,7 @@ class INR(nn.Module):
                     pe, gating_weights = self._apply_gating(pe, x_repr, n_samples=n_samples)
             else:
                 pe, gating_weights = self._apply_gating(pe)
-        # ===== [G1_D 끝] =====
+        # ===== [detach 끝] =====
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
         return density, pe, z, gating_weights
@@ -752,9 +757,6 @@ class NeSVoR(nn.Module):
         xyz_t = ax_transform_points(
             t, xyz_flat[:, None] + xyz_psf * psf_sigma, self.trans_first
         )
-        # xyz_t shape: (n*PP, n_samples, 3)
-        # INR.forward 내부에서 x_norm.dim()==3 을 감지하여
-        # G6/G7 경로는 _get_x_repr_and_n_samples()으로 대표 좌표를 추출함
 
         if self.args.deformable:
             de = self.deform_embedding(slice_idx_flat)[:, None].expand(
@@ -769,12 +771,17 @@ class NeSVoR(nn.Module):
         else:
             se = None
 
-        # ===== [G1_D] ff_direct 모드: encoding detach forward 사용 =====
-        if self.inr.use_gating and self.inr.gating_mode == "ff_direct":
+        # ===== [exp_P] ff_direct가 기본값: use_gating 여부와 무관하게 gating_mode로만 분기 =====
+        # gating_mode == "ff_direct" (기본):
+        #   use_gating=True  → encoding detach + level_weights gradient 수신
+        #   use_gating=False → encoding detach + gating 없음 (density_net만 ff_loss 수신)
+        # gating_mode == "standard" (명시적):
+        #   use_gating=True  → 기존 G1 동작 (encoding + level_weights 모두 ff_loss 수신)
+        if self.inr.gating_mode == "ff_direct":
             results = self.net_forward_ff_direct(xyz_t, se)
         else:
             results = self.net_forward(xyz_t, se)
-        # ===== [G1_D 끝] =====
+        # ===== [exp_P 끝] =====
 
         density = results["density"]
 
