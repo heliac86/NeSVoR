@@ -240,11 +240,9 @@ class INR(nn.Module):
 
         # ===== [G1] Softmax-normalized Gating =====
         self.use_gating = not getattr(args, "no_gating", False)
-        # [exp_P] ff_direct를 기본값으로 설정:
-        #   - use_gating=True  → forward_ff_direct 경유, level_weights는 ff_loss gradient 수신
-        #   - use_gating=False → forward_ff_direct 경유, encoding detach, gating 없음
-        #   명시적으로 "standard"를 전달해야만 G1(기존) 동작으로 복귀
-        self.gating_mode = getattr(args, "gating_mode", "ff_direct")
+        # patch_forward에서 gating 경로를 탈지 여부.
+        # gating이 활성화된 경우에만 level_weights를 통해 patch gradient가 흐른다.
+        self.use_gated_patch = self.use_gating
 
         # ===== [G6] 공간 적응형 게이팅 여부 =====
         self.spatial_gating = (
@@ -286,10 +284,9 @@ class INR(nn.Module):
                     torch.zeros(n_levels, dtype=torch.float32)
                 )
                 logging.info(
-                    "[G1] Hash grid Gating enabled: n_levels=%d, mode=%s, "
+                    "[G1] Hash grid Gating enabled: n_levels=%d, "
                     "init=zeros (softmax -> uniform 1.0), normalization=softmax*n_levels",
                     n_levels,
-                    self.gating_mode,
                 )
         # ===== [G1 끝] =====
 
@@ -440,30 +437,27 @@ class INR(nn.Module):
         else:
             return density
 
-    def forward_ff_direct(
+    def forward_patch(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """ff_direct 모드 전용 forward.
-        encoding은 detach → FF Loss gradient가 오직 gating 파라미터로만 흐름.
-        use_gating=False(no_gating)일 때도 이 경로를 탐 → ff_loss가 density_net만 업데이트.
-        patch_forward에서만 호출됨.
+        """patch_forward 전용 경로.
+        encoding은 detach되어 gradient가 gating 파라미터(level_weights)로만 흐른다.
+        use_gating=False(no_gating)일 때는 gating 파라미터가 없으므로
+        FF Loss gradient는 density_net만 업데이트한다.
         """
         # x shape: (N, n_samples, 3) 또는 (N, 3)
         x_norm = (x - self.bounding_box[0]) / (self.bounding_box[1] - self.bounding_box[0])
         prefix_shape = x_norm.shape[:-1]
         x_flat = x_norm.view(-1, x_norm.shape[-1])
-        # ===== [G1_D / exp_P] encoding detach =====
         pe = self.encoding(x_flat).detach()
         if not self.training:
             pe = pe.to(dtype=x_flat.dtype)
         gating_weights = None
         if self.use_gating:
             if self.spatial_gating:
-                # [G6/G7] 픽셀 대표 좌표 추출 (헬퍼 사용)
                 x_repr, n_samples = self._get_x_repr_and_n_samples(x_norm)
 
                 if self.z_gating:
-                    # [G7] 2-pass (ff_direct 모드: pe는 이미 detach됨)
                     z1 = self.density_net(pe)
                     z_feat1 = z1[:, 1:]
                     if n_samples > 1:
@@ -476,7 +470,6 @@ class INR(nn.Module):
                     pe, gating_weights = self._apply_gating(pe, x_repr, n_samples=n_samples)
             else:
                 pe, gating_weights = self._apply_gating(pe)
-        # ===== [detach 끝] =====
         z = self.density_net(pe)
         density = F.softplus(z[..., 0].view(prefix_shape))
         return density, pe, z, gating_weights
@@ -771,17 +764,10 @@ class NeSVoR(nn.Module):
         else:
             se = None
 
-        # ===== [exp_P] ff_direct가 기본값: use_gating 여부와 무관하게 gating_mode로만 분기 =====
-        # gating_mode == "ff_direct" (기본):
-        #   use_gating=True  → encoding detach + level_weights gradient 수신
-        #   use_gating=False → encoding detach + gating 없음 (density_net만 ff_loss 수신)
-        # gating_mode == "standard" (명시적):
-        #   use_gating=True  → 기존 G1 동작 (encoding + level_weights 모두 ff_loss 수신)
-        if self.inr.gating_mode == "ff_direct":
-            results = self.net_forward_ff_direct(xyz_t, se)
-        else:
+        if self.inr.use_gated_patch:
             results = self.net_forward(xyz_t, se)
-        # ===== [exp_P 끝] =====
+        else:
+            results = self.net_forward_patch(xyz_t, se)
 
         density = results["density"]
 
@@ -841,13 +827,13 @@ class NeSVoR(nn.Module):
 
         return results
 
-    def net_forward_ff_direct(
+    def net_forward_patch(
         self,
         x: torch.Tensor,
         se: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        """ff_direct 모드 전용: encoding detach forward 사용."""
-        density, pe, z, _gating_weights = self.inr.forward_ff_direct(x)
+        """patch_forward 전용: inr.forward_patch 경로 사용."""
+        density, pe, z, _gating_weights = self.inr.forward_patch(x)
         prefix_shape = density.shape
         results = {"density": density}
 
