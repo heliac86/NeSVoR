@@ -19,8 +19,8 @@
 #   원본 스크립트의 '기존 5명 복사' 대상(003/026/030/040/060)과
 #   무관하게, 전체 48명 중 대표성 있는 3명을 선택:
 #     BraTS20_Training_003   (복사 대상이었으나 재현 테스트로 재활용)
-#     BraTS20_Training_126   (중간 번호)
-#     BraTS20_Training_354   (후반 번호)
+#     BraTS20_Training_125   (중간 번호)
+#     BraTS20_Training_356   (후반 번호)
 #   → 다른 환자로 교체하려면 TEST_PATIENTS 배열만 수정할 것
 #
 # ── 주요 인자 (run_ic_dataset.sh 동일 세트) ─────────────────────
@@ -45,8 +45,8 @@
 #       003_flair_4x5_IC_repro.pt
 #       003_t1ce_4x5_IC_repro.nii.gz
 #       003_t1ce_4x5_IC_repro.pt
-#     BraTS20_Training_126/  ...
-#     BraTS20_Training_354/  ...
+#     BraTS20_Training_125/  ...
+#     BraTS20_Training_356/  ...
 #   eval_results/ic_repro_test.csv
 # ================================================================
 
@@ -63,8 +63,8 @@ SKIP_EVAL=${SKIP_EVAL:-0}
 # 재현 테스트 대상 3명. 다른 환자로 교체 시 아래 배열만 수정.
 TEST_PATIENTS=(
     "BraTS20_Training_003"
-    "BraTS20_Training_126"
-    "BraTS20_Training_354"
+    "BraTS20_Training_125"
+    "BraTS20_Training_356"
 )
 
 MODALITIES=(flair t1ce)
@@ -126,7 +126,7 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
     for FULL_ID in "${TEST_PATIENTS[@]}"; do
         for MODALITY in "${MODALITIES[@]}"; do
             TOTAL=$((TOTAL + 1))
-            PATIENT="${FULL_ID##*_}"   # "003", "126", "354"
+            PATIENT="${FULL_ID##*_}"   # "003", "125", "356"
 
             PATIENT_DIR="${REPRO_ROOT}/${FULL_ID}"
             DST="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_IC_repro.nii.gz"
