@@ -78,6 +78,9 @@ ORIG_ROOT="${NESVOR_ROOT}/recon_IC"           # 원본(최고성능) 결과
 EVAL_DIR="${NESVOR_ROOT}/eval_results"
 RESULT_CSV="${EVAL_DIR}/ic_repro_test.csv"
 
+# [FIX] conda 환경 경로 (이름 아님 경로이므로 -p 플래그 사용)
+NERF_TCNN_ENV="/dshome/ddualab/conda_env/nerf_tcnn"
+
 INTENSITY_MEAN=308
 
 # ── BASE ARGS (run_ic_dataset.sh 와 100% 동일) ────────────────
@@ -109,7 +112,6 @@ BASE_ARGS="
 # ────────────────────────────────────────────────────────────────
 # 단계 1: 학습
 # ────────────────────────────────────────────────────────────────
-# [FIX] TOTAL/SUCCESS/FAILED_CASES를 항상 선언 (스킵 시에도 참조 실패 없도록)
 TOTAL=0
 SUCCESS=0
 declare -a FAILED_CASES=()
@@ -133,14 +135,12 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
 
             mkdir -p "${PATIENT_DIR}"
 
-            # 이미 완료된 케이스 스킵
             if [ -f "${DST}" ]; then
                 echo "  [SKIP] 이미 존재: ${FULL_ID} / ${MODALITY}"
                 SUCCESS=$((SUCCESS + 1))
                 continue
             fi
 
-            # 입력 파일 확인
             if [ ! -f "${INPUT}" ]; then
                 echo "  ❌ 입력 파일 없음: ${FULL_ID} / ${MODALITY}"
                 echo "     경로: ${INPUT}"
@@ -194,14 +194,13 @@ fi
 if [ "${SKIP_EVAL}" -eq 0 ]; then
     echo ""
     echo "################################################################"
-    echo "  [단계 2] 이미지 품질 평가 시작"
+    echo "  [다단계 2] 이미지 품질 평가 시작"
     echo "  비교: Ours_orig(recon_IC) vs Repro(recon_IC_repro)"
     echo "  Time : $(date '+%Y-%m-%d %H:%M:%S')"
     echo "################################################################"
 
     mkdir -p "${EVAL_DIR}"
 
-    # 3명 환자 ID만 담은 임시 test.csv 생성
     TEMP_CSV="${EVAL_DIR}/_repro_test_patients.csv"
     echo "Brats20ID" > "${TEMP_CSV}"
     for FULL_ID in "${TEST_PATIENTS[@]}"; do
@@ -209,9 +208,6 @@ if [ "${SKIP_EVAL}" -eq 0 ]; then
     done
     echo "  [INFO] 임시 평가용 CSV 생성: ${TEMP_CSV}"
 
-    # evaluate_batch_v2.py 를 인-플레이스 설정 오버라이드 없이 실행하기 위해
-    # 임시 평가 스크립트를 생성한다.
-    # (원본 evaluate_batch_v2.py를 건드리지 않음)
     TEMP_EVAL="${EVAL_DIR}/_ic_repro_eval.py"
     cat > "${TEMP_EVAL}" << 'PYEOF'
 """
@@ -220,15 +216,12 @@ IC 재현 실험: Ours_orig (recon_IC) vs Repro (recon_IC_repro) 비교용.
 """
 import importlib.util, sys, os
 
-# ── 설정 오버라이드 ────────────────────────────────────────────
-# 환경변수로 주입 (run_ic_repro_test.sh 가 설정)
 NESVOR_ROOT = os.environ["NESVOR_ROOT"]
 RESULT_CSV  = os.environ["RESULT_CSV"]
 TEMP_CSV    = os.environ["TEMP_CSV"]
 REPRO_ROOT  = os.environ["REPRO_ROOT"]
 ORIG_ROOT   = os.environ["ORIG_ROOT"]
 
-# ── evaluate_batch_v2 모듈 동적 로드 ──────────────────────────
 spec = importlib.util.spec_from_file_location(
     "evaluate_batch_v2",
     os.path.join(NESVOR_ROOT, "evaluate_batch_v2.py"),
@@ -236,24 +229,22 @@ spec = importlib.util.spec_from_file_location(
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
-# ── 설정 덮어쓰기 ──────────────────────────────────────────────
 m.TEST_CSV   = TEMP_CSV
 m.RESULT_CSV = RESULT_CSV
 m.METHODS    = {
-    "Ours_orig" : ORIG_ROOT,   # 원본 최고성능 결과 (기준)
-    "Repro"     : REPRO_ROOT,  # IC 브랜치 재현 결과 (비교 대상)
+    "Ours_orig" : ORIG_ROOT,
+    "Repro"     : REPRO_ROOT,
 }
 
-# ── 실행 ───────────────────────────────────────────────────────
 m.main()
 PYEOF
 
     echo "  [INFO] 임시 평가 스크립트 생성: ${TEMP_EVAL}"
 
-    # nerf_tcnn conda 환경에서 실행
+    # [FIX] 경로 형태의 conda 환경은 -n(이름) 대신 -p(경로)를 사용
     export NESVOR_ROOT RESULT_CSV TEMP_CSV REPRO_ROOT ORIG_ROOT
     conda run \
-        -n /dshome/ddualab/conda_env/nerf_tcnn \
+        -p "${NERF_TCNN_ENV}" \
         --no-capture-output \
         python "${TEMP_EVAL}"
 
@@ -264,7 +255,6 @@ PYEOF
         echo "  ✅ 평가 완료 → ${RESULT_CSV}"
     fi
 
-    # 임시 파일 정리 (평가 성공 시에만)
     if [ ${EVAL_EXIT} -eq 0 ]; then
         rm -f "${TEMP_CSV}" "${TEMP_EVAL}"
         echo "  [CLEAN] 임시 파일 삭제 완료"
