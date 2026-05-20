@@ -78,9 +78,6 @@ ORIG_ROOT="${NESVOR_ROOT}/recon_IC"           # 원본(최고성능) 결과
 EVAL_DIR="${NESVOR_ROOT}/eval_results"
 RESULT_CSV="${EVAL_DIR}/ic_repro_test.csv"
 
-# evaluate_batch_v2.py 경로 (IC 브랜치 루트)
-EVAL_SCRIPT="${NESVOR_ROOT}/evaluate_batch_v2.py"
-
 INTENSITY_MEAN=308
 
 # ── BASE ARGS (run_ic_dataset.sh 와 100% 동일) ────────────────
@@ -112,9 +109,10 @@ BASE_ARGS="
 # ────────────────────────────────────────────────────────────────
 # 단계 1: 학습
 # ────────────────────────────────────────────────────────────────
+# [FIX] TOTAL/SUCCESS/FAILED_CASES를 항상 선언 (스킵 시에도 참조 실패 없도록)
 TOTAL=0
 SUCCESS=0
-declare -a FAILED_CASES
+declare -a FAILED_CASES=()
 
 if [ "${SKIP_TRAIN}" -eq 0 ]; then
     echo ""
