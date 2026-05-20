@@ -112,8 +112,6 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
         for FULL_ID in "${FULL_IDS[@]}"; do
             PATIENT="${FULL_ID##*_}"
             PATIENT_DIR="${RECON_ROOT}/${FULL_ID}"
-            DST="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_${SUFFIX}.nii.gz"
-            INPUT_BASE="${DEGRADED_ROOT}/${FULL_ID}/${FULL_ID}"
 
             mkdir -p "${PATIENT_DIR}"
 
@@ -122,7 +120,7 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
 
                 DST="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_${SUFFIX}.nii.gz"
                 DST_PT="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_${SUFFIX}.pt"
-                INPUT="${INPUT_BASE}_${MODALITY}.nii"
+                INPUT="${DEGRADED_ROOT}/${FULL_ID}/${FULL_ID}_${MODALITY}.nii"
 
                 if [ -f "${DST}" ]; then
                     echo "    [SKIP] 이미 존재: ${FULL_ID} / ${MODALITY} / ${COND_KEY}"
