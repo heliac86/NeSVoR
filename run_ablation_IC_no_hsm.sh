@@ -41,9 +41,6 @@ MODALITIES=(flair t1ce)
 
 # ────────────────────────────────────────────────────────────────
 # 어빌레이션 조건 정의
-# 형식: "추가플래그"  (빈 문자열 = BASE_ARGS 그대로)
-# 폴더: ${RECON_BASE}_${COND_KEY}
-# 파일 suffix: ${COND_KEY_LOWER}  (소문자 변환)
 # ────────────────────────────────────────────────────────────────
 CONDITION_KEYS=("Ours" "No_FF" "No_Gating")
 
@@ -80,6 +77,11 @@ BASE_ARGS="
 "
 
 # ────────────────────────────────────────────────────────────────
+# test.csv에서 환자 ID 목록 추출 (헤더 제외, 첫 번째 칼럼만, \r 제거)
+# ────────────────────────────────────────────────────────────────
+mapfile -t FULL_IDS < <(tail -n +2 "${TEST_CSV}" | cut -d',' -f1 | tr -d '\r')
+
+# ────────────────────────────────────────────────────────────────
 # 단계 1: 학습
 # ────────────────────────────────────────────────────────────────
 TOTAL=0
@@ -90,7 +92,9 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
     echo ""
     echo "################################################################"
     echo "  [단계 1] 어빌레이션 학습 시작"
-    echo "  조건: ${CONDITION_KEYS[*]}"
+    echo "  환자 수 : ${#FULL_IDS[@]}명"
+    echo "  조건    : ${CONDITION_KEYS[*]}"
+    echo "  총 케이스: $((${#FULL_IDS[@]} * ${#MODALITIES[@]} * ${#CONDITION_KEYS[@]}))개"
     echo "  Time : $(date '+%Y-%m-%d %H:%M:%S')"
     echo "################################################################"
 
@@ -105,20 +109,20 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
         echo "  출력 루트 : ${RECON_ROOT}"
         echo "  ================================================================"
 
-        while IFS= read -r FULL_ID; do
-            [ -z "${FULL_ID}" ] && continue
-            [ "${FULL_ID}" = "Brats20ID" ] && continue
+        for FULL_ID in "${FULL_IDS[@]}"; do
+            PATIENT="${FULL_ID##*_}"
+            PATIENT_DIR="${RECON_ROOT}/${FULL_ID}"
+            DST="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_${SUFFIX}.nii.gz"
+            INPUT_BASE="${DEGRADED_ROOT}/${FULL_ID}/${FULL_ID}"
+
+            mkdir -p "${PATIENT_DIR}"
 
             for MODALITY in "${MODALITIES[@]}"; do
                 TOTAL=$((TOTAL + 1))
-                PATIENT="${FULL_ID##*_}"
 
-                PATIENT_DIR="${RECON_ROOT}/${FULL_ID}"
                 DST="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_${SUFFIX}.nii.gz"
                 DST_PT="${PATIENT_DIR}/${PATIENT}_${MODALITY}_4x5_${SUFFIX}.pt"
-                INPUT="${DEGRADED_ROOT}/${FULL_ID}/${FULL_ID}_${MODALITY}.nii"
-
-                mkdir -p "${PATIENT_DIR}"
+                INPUT="${INPUT_BASE}_${MODALITY}.nii"
 
                 if [ -f "${DST}" ]; then
                     echo "    [SKIP] 이미 존재: ${FULL_ID} / ${MODALITY} / ${COND_KEY}"
@@ -133,8 +137,10 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
                 fi
 
                 echo ""
+                echo "    ================================================================"
                 echo "    [TRAIN] ${COND_KEY} | Patient=${PATIENT} | Modality=${MODALITY}"
                 echo "    Time  : $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "    ================================================================"
 
                 # shellcheck disable=SC2086
                 nesvor reconstruct \
@@ -156,7 +162,7 @@ if [ "${SKIP_TRAIN}" -eq 0 ]; then
                 fi
 
             done
-        done < "${TEST_CSV}"
+        done
     done
 
     echo ""
