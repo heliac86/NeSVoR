@@ -368,7 +368,8 @@ if [ "${SKIP_EVAL}" -eq 0 ]; then
     echo "  Time : $(date '+%Y-%m-%d %H:%M:%S')"
     echo "################################################################"
 
-    python evaluate_batch_v2.py \
+    # 💡 이 부분의 python을 가상환경 절대경로로 변경했습니다.
+    /dshome/ddualab/conda_env/nerf_tcnn/bin/python evaluate_batch_v2.py \
         --recon-dirs \
             "${OURS_RECON_ROOT}:Ours" \
             "${RECON_ROOT}/G_DH:G_DH" \
