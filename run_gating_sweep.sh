@@ -90,7 +90,8 @@ OURS_RECON_ROOT="/dshome/ddualab/dongnyeok/NeSVoR/recon_IC"
 INTENSITY_MEAN=308
 MODALITIES=(flair t1ce)
 
-# ── BASE_ARGS: Ours(IC no_hsm) 확정 설정 완전 재현 ──────────
+# ── BASE_ARGS: Ours(IC no_hsm) 확정 설정 재현 ──────────
+# 단, 성능에 악영향을 주는 --hard-mining-main-loss 제외
 # div-w, div-v, g-clip 만 세트별로 덮어씀
 BASE_ARGS="
   --output-resolution 1.0
@@ -103,7 +104,6 @@ BASE_ARGS="
   --delta 0.05
   --diversity-loss-fn variance
   --diversity-loss-space raw
-  --hard-mining-main-loss
   --weight-ff-loss 0.05
   --ff-alpha 2.0
   --n-iter 2000
