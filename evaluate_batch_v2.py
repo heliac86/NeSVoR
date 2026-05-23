@@ -509,6 +509,36 @@ def evaluate_pair(gt_path: str, recon_path: str, lpips_fn, device) -> dict:
 # ==============================================================================
 
 def main():
+    # ── 외부 인자를 안전하게 받기 위한 파서 구성 ──
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate batch with external arguments")
+    parser.add_argument('--recon-dirs', nargs='+', required=True, help="List of path:name pairs")
+    parser.add_argument('--degraded-root', help="Not used in this script (ignored)") # sh 파일 호환용 (무시됨)
+    parser.add_argument('--test-csv', required=True, help="Path to test CSV")
+    parser.add_argument('--modalities', nargs='+', required=True, help="List of modalities")
+    parser.add_argument('--output-csv', required=True, help="Path to output result CSV")
+    args = parser.parse_args()
+
+    # 글로벌 변수 제어
+    global TEST_CSV, GT_ROOT, METHODS, MODALITIES, RESULT_CSV
+    
+    # 💡 질문자님의 요청대로 GT_ROOT는 기존 하드코딩된 원본 정답 경로를 그대로 고수합니다.
+    GT_ROOT    = "/data/BraTS2020_TrainingData"
+    
+    TEST_CSV   = args.test_csv
+    MODALITIES = args.modalities
+    RESULT_CSV = args.output_csv
+
+    # .sh 스크립트에서 동적으로 넘겨준 Ours, G_DH 등의 경로만 METHODS에 매칭
+    METHODS = {}
+    for item in args.recon_dirs:
+        if ':' in item:
+            path, name = item.rsplit(':', 1)
+            METHODS[name] = path
+        else:
+            print(f"[WARN] 잘못된 recon-dir 형식입니다 무시합니다: {item}")
+    # ──────────────────────────────────────────────────────────
+
     # 1. test.csv에서 환자 ID 로드
     df_test     = pd.read_csv(TEST_CSV)
     patient_ids = df_test['Brats20ID'].str.strip().tolist()
@@ -529,7 +559,10 @@ def main():
     print(f"[CONFIG] PIQ (FSIM)         = {'available' if PIQ_AVAILABLE else 'NOT AVAILABLE — FSIM will be None'}")
     print("=" * 70)
 
-    os.makedirs(os.path.dirname(RESULT_CSV), exist_ok=True)
+    # 💡 파일 이름만 들어왔을 때 발생하는 폴더 생성 에러 방어 코드
+    output_dir = os.path.dirname(RESULT_CSV)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     results = []
     total   = len(patient_ids) * len(MODALITIES) * len(METHODS)
