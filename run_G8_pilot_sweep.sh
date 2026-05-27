@@ -384,7 +384,7 @@ if [ "${SKIP_EVAL}" -eq 0 ]; then
 
     # 파일럿 환자 ID를 임시 CSV로 저장 (헤더 포함)
     PILOT_CSV="/tmp/pilot_test_G8.csv"
-    echo "patient_id" > "${PILOT_CSV}"
+    echo "Brats20ID" > "${PILOT_CSV}"
     for ID in "${PILOT_IDS[@]}"; do
         echo "${ID}" >> "${PILOT_CSV}"
     done
