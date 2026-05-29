@@ -156,6 +156,47 @@ def build_parser_training() -> argparse.ArgumentParser:
         ),
     )
     # ===== [G7 끝] =====
+    # ===== [G14] GatingMLP 활성화/출력 조정 인자 =====
+    parser.add_argument(
+        "--gating-activation",
+        default="relu",
+        type=str,
+        choices=["relu", "silu"],
+        help=(
+            "Activation function used inside GatingMLP (--spatial-gating). "
+            "'relu' (default): standard ReLU — matches G12 baseline behaviour. "
+            "'silu': Sigmoid Linear Unit (Swish), smoother gradient flow, "
+            "may produce softer weight distributions. "
+            "Ignored when --spatial-gating is not set."
+        ),
+    )
+    parser.add_argument(
+        "--gating-min-weight",
+        default=0.0,
+        type=float,
+        help=(
+            "Minimum value for each level weight output by GatingMLP (--spatial-gating). "
+            "Applied as clamp(min=value) after softmax*n_levels. "
+            "0.0 (default): no lower bound — matches G12 baseline behaviour. "
+            "Recommended values: 0.2 (G14_clamp02) or 0.5 (G14_clamp05). "
+            "Prevents any level from being completely suppressed, "
+            "ensuring all hash grid levels contribute to the reconstruction. "
+            "Ignored when --spatial-gating is not set."
+        ),
+    )
+    parser.add_argument(
+        "--gating-temperature",
+        default=1.0,
+        type=float,
+        help=(
+            "Temperature T for softmax in GatingMLP: softmax(logits / T). "
+            "1.0 (default): standard softmax — matches G12 baseline behaviour. "
+            "T > 1.0 (e.g., 1.5): flatter distribution, weights become more uniform. "
+            "T < 1.0: sharper distribution, more winner-take-all behaviour. "
+            "Ignored when --spatial-gating is not set."
+        ),
+    )
+    # ===== [G14 끝] =====
     # ===== [G6 끝] =====
     # ===== [G1 끝] =====
     parser = _parser.add_argument_group("model architecture (deformable part)")
@@ -221,7 +262,7 @@ def build_parser_training() -> argparse.ArgumentParser:
         help=rst(
             "Type of image regularization. \n\n"
             "1. ``TV``: total variation (L1 regularization of image gradient); \n"
-            "2. ``edge``: edge-preserving regularization, see `--delta <#delta>`__\ . \n"
+            "2. ``edge``: edge-preserving regularization, see `--delta <#delta>`__\\ . \n"
             "3. ``L2``: L2 regularization of image gradient; \n"
             "4. ``none``: no image regularization. \n\n"
         ),
@@ -238,7 +279,7 @@ def build_parser_training() -> argparse.ArgumentParser:
         default=0.2,
         help=rst(
             "Parameter to define intensity of an edge in edge-preserving regularization. "
-            "See `--image-regularization <#image-regularization>`__\ ."
+            "See `--image-regularization <#image-regularization>`__\\ ."
             "The edge-preserving regularization becomes L1 when ``delta`` goes to 0."
         ),
     )
