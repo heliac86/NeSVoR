@@ -16,8 +16,6 @@ export DATA_ROOT="${DATA_ROOT:-/data/nesvor}"
 export OUT_ROOT="${OUT_ROOT:-/results/G14}"
 export CASE_LIST="${CASE_LIST:-${DATA_ROOT}/cases.txt}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 echo "================================================================"
 echo " G14 실험 시작"
 echo "  DATA_ROOT  : ${DATA_ROOT}"
@@ -30,11 +28,11 @@ echo "================================================================"
 mkdir -p "${OUT_ROOT}"
 
 # GPU 0, 1 병렬 실행 — 각 스크립트는 내부에서 케이스를 순차 처리
-bash "${SCRIPT_DIR}/run_G14_gpu0.sh" &
+bash "run_G14_gpu0.sh" &
 PID0=$!
 echo "[launcher] GPU 0 PID=${PID0}  (clamp02, clamp05)"
 
-bash "${SCRIPT_DIR}/run_G14_gpu1.sh" &
+bash "run_G14_gpu1.sh" &
 PID1=$!
 echo "[launcher] GPU 1 PID=${PID1}  (temp15, silu)"
 
