@@ -231,8 +231,8 @@ if [ "${SKIP_EVAL}" -eq 0 ]; then
         "${P2_LR2_RECON_ROOT}:P2_LR2"
         "${G12_RECON_ROOT}:G12_h8z"
     )
-    for EXP_TAG in "${RUN_SETS[@]}"; do
-        RECON_DIR_ARGS+=("${RECON_ROOT}/${EXP_TAG}:${EXP_TAG}")
+    for EVAL_TAG in "${RUN_SETS[@]}"; do
+        RECON_DIR_ARGS+=("${RECON_ROOT}/${EVAL_TAG}:${EVAL_TAG}")
     done
 
     # 파티션별 출력 CSV 이름
