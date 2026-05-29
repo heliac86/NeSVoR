@@ -133,7 +133,7 @@ def compute_resolution_nlevel(
     return int(base_resolution), int(n_levels)
 
 
-# ===== [G6/G7] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level_weights 출력 =====
+# ===== [G6/G7/G14] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level_weights 출력 =====
 class GatingMLP(nn.Module):
     """
     공간 적응형 게이팅 네트워크.
@@ -145,39 +145,83 @@ class GatingMLP(nn.Module):
         z_repr: Pass1(ungated)에서 density_net이 출력한 z 피처를 픽셀별로 평균 + detach
 
     출력: 위치별 level logits (N, n_levels)
-          → _apply_gating 내에서 softmax * n_levels 를 거쳐 가중치로 변환
+          → _apply_gating 내에서 softmax(logits/T) * n_levels 를 거쳐 가중치로 변환
+          → clamp(min=min_weight) 적용 (min_weight > 0 이면)
 
-    구조: Linear(input_dim → hidden_dim) → ReLU → Linear(hidden_dim → n_levels)
+    구조: Linear(input_dim → hidden_dim) → [ReLU|SiLU] → Linear(hidden_dim → n_levels)
 
     초기화: 마지막 레이어를 zeros 로 초기화
             → 학습 시작 시 모든 위치에서 softmax 출력이 균등 (1.0)
             → 기존 전역 level_weights=zeros 초기 상태와 동일
 
-    [G6 버그 수정] 대표 좌표 입력 원칙:
-        GatingMLP는 항상 픽셀당 대표 입력 1개를 받아야 함.
-        PSF Monte Carlo 샘플(n_samples=256개)을 각각 입력하면:
-          - GatingMLP가 픽셀당 256회 호출되어 연산량 256배 낭비
-          - gradient가 PSF 샘플 노이즈에 의해 오염되어 공간 패턴 학습 불가
-        올바른 흐름: x (N, n_samples, 3) → mean(dim=1) → (N, 3) → GatingMLP
-                     weights (N, n_levels) → repeat_interleave(n_samples) → pe 적용
+    [G14 추가 파라미터]
+    activation : str
+        'relu'  — 기존 방식 (default, G6/G7/G12와 동일)
+        'silu'  — SiLU 활성화 (--gating-activation silu)
+                  hidden_dim=8처럼 작은 네트워크에서 dying ReLU를 방지.
+    min_weight : float
+        GatingMLP 출력 weight의 하한 (default=0.0, 하한 없음).
+        0.0 초과이면 softmax*n_levels 이후 clamp(min=min_weight) 적용.
+        어떤 hash grid level도 완전히 억제되지 않도록 보장.
+        예: 0.2 → 모든 level의 최소 가중치 = 0.2
+            0.5 → 모든 level의 최소 가중치 = 0.5 (균등에 가깝게 강제)
+        주의: clamp 후 weights 합계는 n_levels 보존이 깨지지만,
+              GatingMLP가 극단값을 피하는 방향으로 수렴하면
+              실제로 clamp가 활성화되는 비율은 낮아짐.
+    temperature : float
+        softmax temperature T (default=1.0).
+        T > 1.0 → 출력이 더 균등해짐 (level 집중 억제)
+        T < 1.0 → 출력이 더 날카로워짐 (level 집중 강화, 통상 비권장)
+        수식: weights = softmax(logits / T) * n_levels
+
+    [G14 실험 세트]
+    G14_clamp02: activation='relu', min_weight=0.2, temperature=1.0  (--gating-min-weight 0.2)
+    G14_clamp05: activation='relu', min_weight=0.5, temperature=1.0  (--gating-min-weight 0.5)
+    G14_temp15:  activation='relu', min_weight=0.0, temperature=1.5  (--gating-temperature 1.5)
+    G14_silu:    activation='silu', min_weight=0.0, temperature=1.0  (--gating-activation silu)
+    G12_h8z:     activation='relu', min_weight=0.0, temperature=1.0  (기준, 변경 없음)
     """
 
-    def __init__(self, n_levels: int, hidden_dim: int = 32, input_dim: int = 3):
+    def __init__(
+        self,
+        n_levels: int,
+        hidden_dim: int = 32,
+        input_dim: int = 3,
+        activation: str = "relu",
+        min_weight: float = 0.0,
+        temperature: float = 1.0,
+    ):
         super().__init__()
         self.input_dim = input_dim
+        self.min_weight = min_weight
+        self.temperature = temperature
+
+        # ===== [G14] 활성화 함수 선택 =====
+        if activation == "silu":
+            act_fn = nn.SiLU()
+            logging.info("[G14] GatingMLP activation: SiLU")
+        else:
+            act_fn = nn.ReLU()
+            logging.info("[G14] GatingMLP activation: ReLU (default)")
+        # ===== [G14 끝] =====
+
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
+            act_fn,
             nn.Linear(hidden_dim, n_levels),
         )
         # 마지막 레이어 zeros 초기화 → 초기 출력 = 균등 가중치
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
         logging.info(
-            "[G6/G7] GatingMLP initialized: %d -> %d -> %d, params=%d",
+            "[G6/G7/G14] GatingMLP initialized: %d -> %d -> %d "
+            "| activation=%s | min_weight=%.2f | temperature=%.2f | params=%d",
             input_dim,
             hidden_dim,
             n_levels,
+            activation,
+            min_weight,
+            temperature,
             sum(p.numel() for p in self.parameters()),
         )
 
@@ -189,7 +233,7 @@ class GatingMLP(nn.Module):
         반환: (N, n_levels) logit
         """
         return self.net(x)
-# ===== [G6/G7 끝] =====
+# ===== [G6/G7/G14 끝] =====
 
 
 class INR(nn.Module):
@@ -257,24 +301,35 @@ class INR(nn.Module):
 
         if self.use_gating:
             if self.spatial_gating:
-                # [G6/G7] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level logits
+                # [G6/G7/G14] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level logits
                 gating_hidden_dim = getattr(args, "gating_hidden_dim", 32)
                 # [G7] z_gating=True면 입력 차원 확장: 3 → 3 + n_features_z
                 gating_input_dim = (
                     3 + args.n_features_z if self.z_gating else 3
                 )
+                # ===== [G14] 새 파라미터 읽기 =====
+                gating_activation  = getattr(args, "gating_activation",  "relu")
+                gating_min_weight  = getattr(args, "gating_min_weight",  0.0)
+                gating_temperature = getattr(args, "gating_temperature", 1.0)
+                # ===== [G14 끝] =====
                 self.gating_net = GatingMLP(
                     n_levels=n_levels,
                     hidden_dim=gating_hidden_dim,
                     input_dim=gating_input_dim,
+                    activation=gating_activation,
+                    min_weight=gating_min_weight,
+                    temperature=gating_temperature,
                 )
                 logging.info(
-                    "[G6/G7] Spatial Gating enabled: n_levels=%d, hidden_dim=%d, "
-                    "input_dim=%d (z_gating=%s)",
+                    "[G6/G7/G14] Spatial Gating enabled: n_levels=%d, hidden_dim=%d, "
+                    "input_dim=%d (z_gating=%s) | activation=%s min_weight=%.2f temperature=%.2f",
                     n_levels,
                     gating_hidden_dim,
                     gating_input_dim,
                     self.z_gating,
+                    gating_activation,
+                    gating_min_weight,
+                    gating_temperature,
                 )
             else:
                 # [G1] 전역 level_weights (기존 방식)
@@ -351,6 +406,13 @@ class INR(nn.Module):
             x shape    : (N_px, 3)            — 픽셀 대표 좌표
             z_repr shape: (N_px, n_features_z) — Pass1 density_net 출력 z 피처, detach됨
             GatingMLP 입력: cat([x, z_repr], dim=-1) (N_px, 3+n_features_z)
+
+        [G14 수정]
+            temperature: logit을 temperature로 나눈 뒤 softmax
+                         gating_net.temperature 에서 자동 참조
+            min_weight:  softmax*n_levels 이후 clamp(min=min_weight) 적용
+                         gating_net.min_weight 에서 자동 참조
+                         min_weight=0.0 이면 clamp 미적용 (G12 동작과 동일)
         """
         if self.spatial_gating:
             # [G6/G7] 픽셀 대표 입력 준비
@@ -365,7 +427,20 @@ class INR(nn.Module):
                 gating_input = x.float()  # (N_px, 3)
 
             logits = self.gating_net(gating_input)                 # (N_px, n_levels)
+
+            # ===== [G14] temperature scaling =====
+            T = self.gating_net.temperature
+            if T != 1.0:
+                logits = logits / T
+            # ===== [G14 끝] =====
+
             weights = F.softmax(logits, dim=-1) * self.n_levels    # (N_px, n_levels)
+
+            # ===== [G14] min_weight clamp =====
+            min_w = self.gating_net.min_weight
+            if min_w > 0.0:
+                weights = weights.clamp(min=min_w)
+            # ===== [G14 끝] =====
 
             if n_samples > 1:
                 # weights를 n_samples 만큼 반복 확장: (N_px, n_levels) → (N_px*n_samples, n_levels)
@@ -377,7 +452,7 @@ class INR(nn.Module):
             pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
             pe_gate = pe_gate * weights_expanded.unsqueeze(-1)     # (N_px*n_samples, n_levels, n_feat)
             logging.debug(
-                "[G6/G7] spatial weights mean per level: %s",
+                "[G6/G7/G14] spatial weights mean per level: %s",
                 [f"{v:.4f}" for v in weights.detach().mean(0).cpu().tolist()],
             )
         else:
@@ -752,9 +827,6 @@ class NeSVoR(nn.Module):
         xyz_t = ax_transform_points(
             t, xyz_flat[:, None] + xyz_psf * psf_sigma, self.trans_first
         )
-        # xyz_t shape: (n*PP, n_samples, 3)
-        # INR.forward 내부에서 x_norm.dim()==3 을 감지하여
-        # G6/G7 경로는 _get_x_repr_and_n_samples()으로 대표 좌표를 추출함
 
         if self.args.deformable:
             de = self.deform_embedding(slice_idx_flat)[:, None].expand(
@@ -769,12 +841,10 @@ class NeSVoR(nn.Module):
         else:
             se = None
 
-        # ===== [G1_D] ff_direct 모드: encoding detach forward 사용 =====
         if self.inr.use_gating and self.inr.gating_mode == "ff_direct":
             results = self.net_forward_ff_direct(xyz_t, se)
         else:
             results = self.net_forward(xyz_t, se)
-        # ===== [G1_D 끝] =====
 
         density = results["density"]
 
@@ -792,7 +862,6 @@ class NeSVoR(nn.Module):
         v_pred = c * v_pred
         v_pred_patch = v_pred.view(n, P, P)
 
-        # ===== [E3] mean-fill =====
         mask_float = valid_mask_patch.float()
         bg_mask = 1.0 - mask_float
         valid_sum_pred = (v_pred_patch * mask_float).sum(dim=(-2, -1))
@@ -802,7 +871,6 @@ class NeSVoR(nn.Module):
         mean_gt   = valid_sum_gt   / valid_count
         v_pred_filled = v_pred_patch * mask_float + mean_pred.view(n, 1, 1) * bg_mask
         v_gt_filled   = v_patch      * mask_float + mean_gt.view(n, 1, 1)   * bg_mask
-        # ===== [E3 mean-fill 끝] =====
 
         ff_loss = self.ff_loss_fn(v_pred_filled, v_gt_filled)
         return {FF_LOSS: ff_loss}
