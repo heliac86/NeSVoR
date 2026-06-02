@@ -9,8 +9,8 @@
 #
 # ── 사용 예 ──────────────────────────────────────────────────
 #   ./run_G14s_t1t2.sh
-#   SKIP_TRAIN=1 ./run_G14s_t1t2.sh   # 평가만
-#   SKIP_EVAL=1  ./run_G14s_t1t2.sh   # 학습만
+#   SKIP_TRAIN=1 ./run_G14s_GA.sh   # 평가만
+#   SKIP_EVAL=1  ./run_G14s_GA.sh   # 학습만
 #
 # ── 출력 파일 명명 규칙 ───────────────────────────────────────
 #   recon_G14s/BraTS20_Training_{PATIENT}/
@@ -35,7 +35,7 @@ SKIP_EVAL=${SKIP_EVAL:-0}
 
 # ── 경로 설정 ────────────────────────────────────────────────
 EXP_TAG="G14s"
-RECON_ROOT="/dshome/ddualab/dongnyeok/NeSVoR/recon_G14s/${EXP_TAG}"
+RECON_ROOT="/dshome/ddualab/dongnyeok/NeSVoR/recon_${EXP_TAG}"
 DEGRADED_ROOT="/data/BraTS20_Degraded_4x_5"
 TEST_CSV="/dshome/ddualab/dongnyeok/NeSVoR/test.csv"
 
