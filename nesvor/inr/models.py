@@ -509,7 +509,7 @@ class INR(nn.Module):
         if self.training:
             return density, pe, z, gating_weights
         else:
-            return density
+            return density, gating_weights
 
     def forward_ff_direct(
         self, x: torch.Tensor
@@ -946,7 +946,7 @@ class NeSVoR(nn.Module):
             n_sample = 4
             xyz = xyz[:, :n_sample].flatten(0, 1).detach()
             xyz.requires_grad_()
-            density, _, _, _ = self.inr(xyz)
+            density, _ = self.inr(xyz)
             grad = (
                 torch.autograd.grad((density.sum(),), (xyz,), create_graph=True)[0]
                 / self.spatial_scaling
