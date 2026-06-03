@@ -112,6 +112,11 @@ def find_modality_file(dataset_root: str, patient_id: str, modality: str) -> Opt
     ]
     for pat in patterns:
         hits = glob.glob(pat)
+        # 기존의 유연한 glob 탐색은 유지
+        # 현재 모달리티가 정확히 't1'일 때만 't1ce'가 포함된 오인 매칭 파일들을 필터링해서 제거
+        if modality == "t1":
+            hits = [h for h in hits if "t1ce" not in os.path.basename(h)]
+            
         if hits:
             return hits[0]
     return None
