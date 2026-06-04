@@ -61,7 +61,7 @@ def load_inr_from_ckpt(pt_path, device):
     sd   = ckpt["model"]
     bb   = sd["bounding_box"].to(device)  # state_dict 안에 있음
     
-    model = INR(bb, args)                 # INR만 생성
+    model = INR(bb, args).to(device)          # INR만 생성, .to(device)를 추가하여 모델을 GPU로 이동
     model.load_state_dict(sd)
     model.eval()
     return model
