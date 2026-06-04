@@ -36,7 +36,8 @@ EXP_TAG    = "G14s"
 
 # 공간 분포 히트맵 저장 여부 (케이스당 N_LEVELS장 → 용량 큼)
 SAVE_SPATIAL     = True
-SPATIAL_LEVELS   = [6, 9, 12, 14]   # 저장할 레벨 인덱스 (1-based)
+# SPATIAL_LEVELS   = [4, 6, 9, 12]   # 저장할 레벨 인덱스 (1-based)
+SPATIAL_LEVELS = list(range(1, N_LEVELS + 1))  # N_LEVELS 변경 시 자동 대응
 SPATIAL_N_CASES  = 5                 # 모달리티당 저장할 케이스 수 (0=전체)
 
 # 볼륨 좌표 샘플링 stride (클수록 빠르지만 해상도 낮음)
@@ -99,7 +100,7 @@ def extract_global_weights(model, nii_path: str, device,
     with torch.no_grad():
         for i in range(0, xyz_t.shape[0], BATCH):
             batch_xyz = xyz_t[i:i+BATCH]
-            _, w = model.inr(batch_xyz)          # (B, n_levels)
+            _, w = model(batch_xyz)          # (B, n_levels)
             if w is not None:
                 all_weights.append(w.cpu().float())
 
@@ -162,14 +163,14 @@ for pt_path in pt_files:
             )
         else:
             # nii 없을 경우: bounding_box 격자 샘플링 fallback
-            bb     = model.inr.bounding_box.cpu().numpy()
+            bb     = model.bounding_box.cpu().numpy()
             xs_mm  = np.linspace(bb[0,0], bb[1,0], 30)
             ys_mm  = np.linspace(bb[0,1], bb[1,1], 30)
             zs_mm  = np.linspace(bb[0,2], bb[1,2], 30)
             grid   = np.stack(np.meshgrid(xs_mm, ys_mm, zs_mm, indexing='ij'), -1)
             xyz_t  = torch.from_numpy(grid.reshape(-1,3).astype(np.float32)).to(device)
             with torch.no_grad():
-                _, w = model.inr(xyz_t)
+                _, w = model(xyz_t)
             global_mean  = w.cpu().float().mean(dim=0).numpy() if w is not None else np.ones(N_LEVELS)
             weights_vol  = None
 
