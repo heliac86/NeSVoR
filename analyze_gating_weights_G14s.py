@@ -26,7 +26,7 @@ from scipy import stats
 
 # ── 경로 ──────────────────────────────────────────────────────
 RECON_ROOT = "/dshome/ddualab/dongnyeok/NeSVoR/recon_G14s"
-OUT_DIR    = "/dshome/ddualab/dongnyeok/NeSVoR/gating_analysis_G14s"
+OUT_DIR    = "/dshome/ddualab/dongnyeok/NeSVoR/gating_analysis_G14s_2"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ── 실험 파라미터 ──────────────────────────────────────────────
@@ -55,6 +55,7 @@ COLORS = {
 # ================================================================
 def load_inr_from_ckpt(pt_path, device):
     from nesvor.inr.models import INR  # INR 클래스만 임포트
+  
     ckpt = torch.load(pt_path, map_location=device, weights_only=False)
     
     args = ckpt["args"]
@@ -63,12 +64,22 @@ def load_inr_from_ckpt(pt_path, device):
     
     model = INR(bb, args).to(device)          # INR만 생성
     
-    # ── [수정 부분] ──────────────────────────────────────────────
-    # strict=False를 추가하여 크기가 일치하지 않는 encoding.params는 무시하고
-    # 구조가 일치하는 gating 레이어 가중치들만 정상적으로 로드
-    model.load_state_dict(sd, strict=False)
+    # ── [추가된 크기 불일치 해결 로직] ──────────────────────────────
+    model_sd = model.state_dict()
+    keys_to_delete = []
+    
+    for key in sd.keys():
+        if key in model_sd and sd[key].shape != model_sd[key].shape:
+            # 크기가 다른 파라미터(예: encoding.params)를 감지하여 로그를 남기고 제거 명단에 추가
+            print(f"    [INFO] 크기 불일치 감지 파라미터 제외 -> {key}: model{model_sd[key].shape} vs ckpt{sd[key].shape}")
+            keys_to_delete.append(key)
+            
+    for key in keys_to_delete:
+        del sd[key]  # 체크포인트 데이터에서 해당 파라미터 삭제 (Missing Key 상태로 만듦)
     # ─────────────────────────────────────────────────────────────
     
+    # 이제 strict=False가 누락된 encoding.params를 에러 없이 무시하고 넘어가 줍니다.
+    model.load_state_dict(sd, strict=False)
     model.eval()
     return model
 
