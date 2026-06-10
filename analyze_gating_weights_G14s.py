@@ -61,8 +61,14 @@ def load_inr_from_ckpt(pt_path, device):
     sd   = ckpt["model"]
     bb   = sd["bounding_box"].to(device)  # state_dict 안에 있음
     
-    model = INR(bb, args).to(device)          # INR만 생성, .to(device)를 추가하여 모델을 GPU로 이동
-    model.load_state_dict(sd)
+    model = INR(bb, args).to(device)          # INR만 생성
+    
+    # ── [수정 부분] ──────────────────────────────────────────────
+    # strict=False를 추가하여 크기가 일치하지 않는 encoding.params는 무시하고
+    # 구조가 일치하는 gating 레이어 가중치들만 정상적으로 로드
+    model.load_state_dict(sd, strict=False)
+    # ─────────────────────────────────────────────────────────────
+    
     model.eval()
     return model
 
