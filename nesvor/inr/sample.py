@@ -74,7 +74,9 @@ def sample_points(
                 resolution2sigma(resolution, isotropic=True),
                 0 if resolution <= 0 else n_samples,
             )
-            v_b = model(xyz_batch).mean(-1)
+            output = model(xyz_batch)
+            density = output[0] if isinstance(output, tuple) else output
+            v_b = density.mean(-1)
             v[i : i + batch_size] = v_b
     # [k_norm] INR 출력은 정규화된 단위(약 1.0 수준)이므로
     # v_mean을 곱해 원본 BraTS 강도 범위로 복원함.
@@ -103,7 +105,9 @@ def sample_slice(
             ),
             0 if output_psf_factor <= 0 else n_samples,
         )
-        v = model(xyz_masked).mean(-1)
+        output = model(xyz_masked)
+        density = output[0] if isinstance(output, tuple) else output
+        v = density.mean(-1)
         # [k_norm] 슬라이스 샘플링 시에도 동일한 역정규화 적용
         v = v * model.v_mean.item()
         slice_sampled.mask = m.view(slice_sampled.mask.shape)

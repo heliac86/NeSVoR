@@ -1,0 +1,654 @@
+nesvor 실행 파일: /dshome/ddualab/conda_env/nesvor/bin/nesvor
+#!/dshome/ddualab/conda_env/nesvor/bin/python3.10
+import sys
+from nesvor.cli.main import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())
+
+
+===== models.py =====
+--- /dshome/ddualab/dongnyeok/NeSVoR/nesvor/inr/models.py
++++ /dshome/ddualab/dongnyeok/NeSVoR_alt_IC/nesvor/inr/models.py
+@@ -133,7 +133,7 @@
+     return int(base_resolution), int(n_levels)
+ 
+ 
+-# ===== [G6/G7] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level_weights 출력 =====
++# ===== [G6/G7/G14] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level_weights 출력 =====
+ class GatingMLP(nn.Module):
+     """
+     공간 적응형 게이팅 네트워크.
+@@ -145,39 +145,83 @@
+         z_repr: Pass1(ungated)에서 density_net이 출력한 z 피처를 픽셀별로 평균 + detach
+ 
+     출력: 위치별 level logits (N, n_levels)
+-          → _apply_gating 내에서 softmax * n_levels 를 거쳐 가중치로 변환
+-
+-    구조: Linear(input_dim → hidden_dim) → ReLU → Linear(hidden_dim → n_levels)
++          → _apply_gating 내에서 softmax(logits/T) * n_levels 를 거쳐 가중치로 변환
++          → clamp(min=min_weight) 적용 (min_weight > 0 이면)
++
++    구조: Linear(input_dim → hidden_dim) → [ReLU|SiLU] → Linear(hidden_dim → n_levels)
+ 
+     초기화: 마지막 레이어를 zeros 로 초기화
+             → 학습 시작 시 모든 위치에서 softmax 출력이 균등 (1.0)
+             → 기존 전역 level_weights=zeros 초기 상태와 동일
+ 
+-    [G6 버그 수정] 대표 좌표 입력 원칙:
+-        GatingMLP는 항상 픽셀당 대표 입력 1개를 받아야 함.
+-        PSF Monte Carlo 샘플(n_samples=256개)을 각각 입력하면:
+-          - GatingMLP가 픽셀당 256회 호출되어 연산량 256배 낭비
+-          - gradient가 PSF 샘플 노이즈에 의해 오염되어 공간 패턴 학습 불가
+-        올바른 흐름: x (N, n_samples, 3) → mean(dim=1) → (N, 3) → GatingMLP
+-                     weights (N, n_levels) → repeat_interleave(n_samples) → pe 적용
++    [G14 추가 파라미터]
++    activation : str
++        'relu'  — 기존 방식 (default, G6/G7/G12와 동일)
++        'silu'  — SiLU 활성화 (--gating-activation silu)
++                  hidden_dim=8처럼 작은 네트워크에서 dying ReLU를 방지.
++    min_weight : float
++        GatingMLP 출력 weight의 하한 (default=0.0, 하한 없음).
++        0.0 초과이면 softmax*n_levels 이후 clamp(min=min_weight) 적용.
++        어떤 hash grid level도 완전히 억제되지 않도록 보장.
++        예: 0.2 → 모든 level의 최소 가중치 = 0.2
++            0.5 → 모든 level의 최소 가중치 = 0.5 (균등에 가깝게 강제)
++        주의: clamp 후 weights 합계는 n_levels 보존이 깨지지만,
++              GatingMLP가 극단값을 피하는 방향으로 수렴하면
++              실제로 clamp가 활성화되는 비율은 낮아짐.
++    temperature : float
++        softmax temperature T (default=1.0).
++        T > 1.0 → 출력이 더 균등해짐 (level 집중 억제)
++        T < 1.0 → 출력이 더 날카로워짐 (level 집중 강화, 통상 비권장)
++        수식: weights = softmax(logits / T) * n_levels
++
++    [G14 실험 세트]
++    G14_clamp02: activation='relu', min_weight=0.2, temperature=1.0  (--gating-min-weight 0.2)
++    G14_clamp05: activation='relu', min_weight=0.5, temperature=1.0  (--gating-min-weight 0.5)
++    G14_temp15:  activation='relu', min_weight=0.0, temperature=1.5  (--gating-temperature 1.5)
++    G14_silu:    activation='silu', min_weight=0.0, temperature=1.0  (--gating-activation silu)
++    G12_h8z:     activation='relu', min_weight=0.0, temperature=1.0  (기준, 변경 없음)
+     """
+ 
+-    def __init__(self, n_levels: int, hidden_dim: int = 32, input_dim: int = 3):
++    def __init__(
++        self,
++        n_levels: int,
++        hidden_dim: int = 32,
++        input_dim: int = 3,
++        activation: str = "relu",
++        min_weight: float = 0.0,
++        temperature: float = 1.0,
++    ):
+         super().__init__()
+         self.input_dim = input_dim
++        self.min_weight = min_weight
++        self.temperature = temperature
++
++        # ===== [G14] 활성화 함수 선택 =====
++        if activation == "silu":
++            act_fn = nn.SiLU()
++            logging.info("[G14] GatingMLP activation: SiLU")
++        else:
++            act_fn = nn.ReLU()
++            logging.info("[G14] GatingMLP activation: ReLU (default)")
++        # ===== [G14 끝] =====
++
+         self.net = nn.Sequential(
+             nn.Linear(input_dim, hidden_dim),
+-            nn.ReLU(),
++            act_fn,
+             nn.Linear(hidden_dim, n_levels),
+         )
+         # 마지막 레이어 zeros 초기화 → 초기 출력 = 균등 가중치
+         nn.init.zeros_(self.net[-1].weight)
+         nn.init.zeros_(self.net[-1].bias)
+         logging.info(
+-            "[G6/G7] GatingMLP initialized: %d -> %d -> %d, params=%d",
++            "[G6/G7/G14] GatingMLP initialized: %d -> %d -> %d "
++            "| activation=%s | min_weight=%.2f | temperature=%.2f | params=%d",
+             input_dim,
+             hidden_dim,
+             n_levels,
++            activation,
++            min_weight,
++            temperature,
+             sum(p.numel() for p in self.parameters()),
+         )
+ 
+@@ -189,7 +233,7 @@
+         반환: (N, n_levels) logit
+         """
+         return self.net(x)
+-# ===== [G6/G7 끝] =====
++# ===== [G6/G7/G14 끝] =====
+ 
+ 
+ class INR(nn.Module):
+@@ -257,24 +301,35 @@
+ 
+         if self.use_gating:
+             if self.spatial_gating:
+-                # [G6/G7] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level logits
++                # [G6/G7/G14] GatingMLP: 좌표 (+ 선택적 z_repr) → 위치별 level logits
+                 gating_hidden_dim = getattr(args, "gating_hidden_dim", 32)
+                 # [G7] z_gating=True면 입력 차원 확장: 3 → 3 + n_features_z
+                 gating_input_dim = (
+                     3 + args.n_features_z if self.z_gating else 3
+                 )
++                # ===== [G14] 새 파라미터 읽기 =====
++                gating_activation  = getattr(args, "gating_activation",  "relu")
++                gating_min_weight  = getattr(args, "gating_min_weight",  0.0)
++                gating_temperature = getattr(args, "gating_temperature", 1.0)
++                # ===== [G14 끝] =====
+                 self.gating_net = GatingMLP(
+                     n_levels=n_levels,
+                     hidden_dim=gating_hidden_dim,
+                     input_dim=gating_input_dim,
++                    activation=gating_activation,
++                    min_weight=gating_min_weight,
++                    temperature=gating_temperature,
+                 )
+                 logging.info(
+-                    "[G6/G7] Spatial Gating enabled: n_levels=%d, hidden_dim=%d, "
+-                    "input_dim=%d (z_gating=%s)",
++                    "[G6/G7/G14] Spatial Gating enabled: n_levels=%d, hidden_dim=%d, "
++                    "input_dim=%d (z_gating=%s) | activation=%s min_weight=%.2f temperature=%.2f",
+                     n_levels,
+                     gating_hidden_dim,
+                     gating_input_dim,
+                     self.z_gating,
++                    gating_activation,
++                    gating_min_weight,
++                    gating_temperature,
+                 )
+             else:
+                 # [G1] 전역 level_weights (기존 방식)
+@@ -351,6 +406,13 @@
+             x shape    : (N_px, 3)            — 픽셀 대표 좌표
+             z_repr shape: (N_px, n_features_z) — Pass1 density_net 출력 z 피처, detach됨
+             GatingMLP 입력: cat([x, z_repr], dim=-1) (N_px, 3+n_features_z)
++
++        [G14 수정]
++            temperature: logit을 temperature로 나눈 뒤 softmax
++                         gating_net.temperature 에서 자동 참조
++            min_weight:  softmax*n_levels 이후 clamp(min=min_weight) 적용
++                         gating_net.min_weight 에서 자동 참조
++                         min_weight=0.0 이면 clamp 미적용 (G12 동작과 동일)
+         """
+         if self.spatial_gating:
+             # [G6/G7] 픽셀 대표 입력 준비
+@@ -365,7 +427,20 @@
+                 gating_input = x.float()  # (N_px, 3)
+ 
+             logits = self.gating_net(gating_input)                 # (N_px, n_levels)
++
++            # ===== [G14] temperature scaling =====
++            T = self.gating_net.temperature
++            if T != 1.0:
++                logits = logits / T
++            # ===== [G14 끝] =====
++
+             weights = F.softmax(logits, dim=-1) * self.n_levels    # (N_px, n_levels)
++
++            # ===== [G14] min_weight clamp =====
++            min_w = self.gating_net.min_weight
++            if min_w > 0.0:
++                weights = weights.clamp(min=min_w)
++            # ===== [G14 끝] =====
+ 
+             if n_samples > 1:
+                 # weights를 n_samples 만큼 반복 확장: (N_px, n_levels) → (N_px*n_samples, n_levels)
+@@ -377,7 +452,7 @@
+             pe_gate = pe.view(-1, self.n_levels, self.n_features_per_level)
+             pe_gate = pe_gate * weights_expanded.unsqueeze(-1)     # (N_px*n_samples, n_levels, n_feat)
+             logging.debug(
+-                "[G6/G7] spatial weights mean per level: %s",
++                "[G6/G7/G14] spatial weights mean per level: %s",
+                 [f"{v:.4f}" for v in weights.detach().mean(0).cpu().tolist()],
+             )
+         else:
+@@ -434,7 +509,7 @@
+         if self.training:
+             return density, pe, z, gating_weights
+         else:
+-            return density
++            return density, gating_weights
+ 
+     def forward_ff_direct(
+         self, x: torch.Tensor
+@@ -740,7 +815,7 @@
+         PP = xyz_patch.shape[1]
+         P = int(PP ** 0.5)
+ 
+-        xyz_flat = xyz_patch.view(n * PP, 3)
++        xyz_flat = xyz_patch.view(n * PP, 3) / self.spatial_scaling
+         slice_idx_flat = slice_idx_patch.repeat_interleave(PP)
+ 
+         n_samples = self.args.n_samples
+@@ -752,9 +827,6 @@
+         xyz_t = ax_transform_points(
+             t, xyz_flat[:, None] + xyz_psf * psf_sigma, self.trans_first
+         )
+-        # xyz_t shape: (n*PP, n_samples, 3)
+-        # INR.forward 내부에서 x_norm.dim()==3 을 감지하여
+-        # G6/G7 경로는 _get_x_repr_and_n_samples()으로 대표 좌표를 추출함
+ 
+         if self.args.deformable:
+             de = self.deform_embedding(slice_idx_flat)[:, None].expand(
+@@ -769,12 +841,10 @@
+         else:
+             se = None
+ 
+-        # ===== [G1_D] ff_direct 모드: encoding detach forward 사용 =====
+         if self.inr.use_gating and self.inr.gating_mode == "ff_direct":
+             results = self.net_forward_ff_direct(xyz_t, se)
+         else:
+             results = self.net_forward(xyz_t, se)
+-        # ===== [G1_D 끝] =====
+ 
+         density = results["density"]
+ 
+@@ -792,7 +862,6 @@
+         v_pred = c * v_pred
+         v_pred_patch = v_pred.view(n, P, P)
+ 
+-        # ===== [E3] mean-fill =====
+         mask_float = valid_mask_patch.float()
+         bg_mask = 1.0 - mask_float
+         valid_sum_pred = (v_pred_patch * mask_float).sum(dim=(-2, -1))
+@@ -802,7 +871,6 @@
+         mean_gt   = valid_sum_gt   / valid_count
+         v_pred_filled = v_pred_patch * mask_float + mean_pred.view(n, 1, 1) * bg_mask
+         v_gt_filled   = v_patch      * mask_float + mean_gt.view(n, 1, 1)   * bg_mask
+-        # ===== [E3 mean-fill 끝] =====
+ 
+         ff_loss = self.ff_loss_fn(v_pred_filled, v_gt_filled)
+         return {FF_LOSS: ff_loss}
+@@ -878,7 +946,7 @@
+             n_sample = 4
+             xyz = xyz[:, :n_sample].flatten(0, 1).detach()
+             xyz.requires_grad_()
+-            density, _, _, _ = self.inr(xyz)
++            density, _ = self.inr(xyz)
+             grad = (
+                 torch.autograd.grad((density.sum(),), (xyz,), create_graph=True)[0]
+                 / self.spatial_scaling
+
+
+===== sample.py =====
+두 파일 동일
+
+===== train.py =====
+--- /dshome/ddualab/dongnyeok/NeSVoR/nesvor/inr/train.py
++++ /dshome/ddualab/dongnyeok/NeSVoR_alt_IC/nesvor/inr/train.py
+@@ -164,6 +164,9 @@
+         )
+ 
+     # ===== [안전성 개선] diversity loss 파라미터: params_gating[0] 대신 model.inr.level_weights 직접 참조 =====
++    # params_gating[0]은 파라미터 등록 순서에 의존하므로, 나중에 코드가 변경되면
++    # 의도치 않은 파라미터를 참조할 수 있음. model.inr.level_weights를 직접 사용하면
++    # 항상 올바른 파라미터를 참조하며, 문제 발생 시 즉시 명시적 에러가 발생.
+     if use_diversity_loss:
+         _level_weights_param = model.inr.level_weights
+         assert isinstance(_level_weights_param, torch.nn.Parameter), (
+@@ -199,48 +202,22 @@
+     patch_size = getattr(args, "patch_size", 16)
+     n_patches  = getattr(args, "n_patches",  8)
+ 
+-    # ===== [Hard Slice Mining] EMA alpha 및 start iter 설정 =====
+-    # --slice-residual-alpha : EMA 감쇠 계수. 작을수록 최근 잔차에 민감하게 반응.
+-    #   분석 결과: alpha=0.99 + n_iter=2000 조합에서 슬라이스당 업데이트 ~20회
+-    #   → 초기값 잔존율 82% → EMA가 실제 잔차를 반영 못 함
+-    #   권장값: 0.9 (초기값 잔존율 ~12%로 대폭 개선)
+-    SLICE_RESIDUAL_EMA = getattr(args, "slice_residual_alpha", 0.99)
+-
+-    # --hard-mining-start-iter : 이 iter 이전에는 HSM 비활성화 (균등 샘플링).
+-    #   분석 결과: 잔차 분산이 iter ~1000 이후에야 진짜 차별화됨 (LR decay 0.5×n_iter)
+-    #   → 초기 노이즈 구간에서 HSM 활성화 시 노이즈 추격 발생 (Spearman 음수)
+-    #   권장값: int(0.5 * n_iter) — milestones 첫 번째 decay 직후
+-    HARD_MINING_START_ITER = getattr(args, "hard_mining_start_iter", 0)
+-
++    # ===== [Hard Slice Mining] 슬라이스별 MSE 잔차 EMA 초기화 =====
++    SLICE_RESIDUAL_EMA = 0.99
+     n_slices = dataset.n_slices
+     slice_residuals = torch.zeros(n_slices, dtype=torch.float32)
+     slice_counts    = torch.zeros(n_slices, dtype=torch.long)
+     _residuals_initialized = False
+-    logging.info(
+-        "[HSM] slice_residual_alpha=%.3f, hard_mining_start_iter=%d",
+-        SLICE_RESIDUAL_EMA,
+-        HARD_MINING_START_ITER,
+-    )
++    logging.info("[E3] slice_residuals will be initialized from first batch MSE (no warmup needed).")
+     # ===== [Hard Slice Mining 끝] =====
+ 
+-    # ===== [Ablation] --no-hard-mining: HSM 완전 비활성화 플래그 =====
+-    no_hard_mining = getattr(args, "no_hard_mining", False)
+-    if no_hard_mining:
+-        use_hard_mining_main_loss = False
+-        logging.info(
+-            "[Ablation] --no-hard-mining enabled: HSM fully disabled "
+-            "(main loss sampling AND FF patch sampling both set to uniform)."
+-        )
+-    else:
+-        use_hard_mining_main_loss = getattr(args, "hard_mining_main_loss", False)
+-    # ===== [Ablation 끝] =====
+-
+-    # ===== [HM2] --hard-mining-main-loss 플래그 로그 =====
++    HARD_MINING_WARMUP = getattr(args, "hard_mining_warmup", 0)
++    # ===== [HM2] --hard-mining-main-loss 플래그: get_batch()에도 hard mining 적용 여부 =====
++    use_hard_mining_main_loss = getattr(args, "hard_mining_main_loss", False)
+     if use_hard_mining_main_loss:
+         logging.info(
+             "[HM2] Hard Mining for main MSE loss (get_batch) ENABLED. "
+-            "Slice residuals will be used to weight pixel sampling after iter %d.",
+-            HARD_MINING_START_ITER,
++            "Slice residuals will be used to weight pixel sampling after warmup."
+         )
+     else:
+         logging.info(
+@@ -249,34 +226,10 @@
+         )
+     # ===== [HM2 끝] =====
+ 
+-    # ===== [ANALYSIS] 슬라이스 분석용 데이터 수집 초기화 =====
+-    slice_sample_counts_main  = torch.zeros(n_slices, dtype=torch.long)
+-    slice_sample_counts_patch = torch.zeros(n_slices, dtype=torch.long)
+-    residuals_history = []
+-
+-    # ① 에포크 내 첫 등장 배치 위치 누적 (HM2 직접 증거)
+-    slice_first_batch_pos_sum   = torch.zeros(n_slices, dtype=torch.float32)
+-    slice_first_batch_pos_count = torch.zeros(n_slices, dtype=torch.long)
+-
+-    # ② 슬라이스별 Loss 기여량 누적
+-    slice_loss_sum   = torch.zeros(n_slices, dtype=torch.float32)
+-    slice_loss_count_arr = torch.zeros(n_slices, dtype=torch.long)
+-
+-    # ③ 에포크 전반/후반 Loss 기여 분리
+-    slice_loss_early_sum = torch.zeros(n_slices, dtype=torch.float32)
+-    slice_loss_late_sum  = torch.zeros(n_slices, dtype=torch.float32)
+-
+-    # ④ 스냅샷 스케줄 (초반 밀집)
+-    snapshot_iters = set(
+-        list(range(50, min(200, args.n_iter), 50)) +
+-        list(range(200, args.n_iter + 1, 200))
+-    )
+-
+-    # 에포크 내 배치 위치 추적용 내부 상태
+-    _current_epoch_half_size = 0   # 에포크 절반 배치 수 (에포크 경계에서 갱신)
+-    _batch_in_epoch = 0            # 에포크 내 현재 배치 번호
+-    _epoch_id = -1                 # 직전 epoch 번호 (경계 감지용)
+-    # ===== [ANALYSIS 끝] =====
++    logging.info(
++        "[E3] Hard Slice Mining warmup: %d iters (0 = immediate activation after first-batch init).",
++        HARD_MINING_WARMUP,
++    )
+ 
+     if use_ff_loss:
+         logging.info(
+@@ -301,52 +254,14 @@
+         # ===== [G3_warmup 끝] =====
+ 
+         # ===== [HM2] get_batch() 호출 시 sampling_probs 결정 =====
+-        # hard_mining_start_iter 이전에는 균등 샘플링 강제
+-        # → 초기 노이즈 구간에서 HSM이 노이즈를 추격하는 문제 방지
+-        if use_hard_mining_main_loss and _residuals_initialized and i > HARD_MINING_START_ITER:
++        if use_hard_mining_main_loss and _residuals_initialized and i > HARD_MINING_WARMUP:
+             main_sampling_probs = slice_residuals / slice_residuals.sum()
+         else:
+             main_sampling_probs = None
+         # ===== [HM2 끝] =====
+ 
+         # forward
+-        batch = dataset.get_batch(
+-            args.batch_size, args.device,
+-            sampling_probs=main_sampling_probs,
+-            hsm_beta=getattr(args, "hsm_beta", 1.0),
+-        )
+-
+-        # ===== [ANALYSIS] 메인 배치 슬라이스 샘플링 카운트 + 에포크 위치 추적 =====
+-        with torch.no_grad():
+-            _batch_slice_ids = batch["slice_idx"].cpu()
+-
+-            # 에포크 경계 감지
+-            if dataset.epoch != _epoch_id:
+-                _epoch_id = dataset.epoch
+-                _batch_in_epoch = 0
+-                # 에포크 전체 배치 수의 절반 (전반/후반 경계)
+-                total_pixels = dataset.xyz.shape[0]
+-                _current_epoch_half_size = max(1, (total_pixels // args.batch_size) // 2)
+-
+-            # 슬라이스별 픽셀 누적 카운트 (기존)
+-            for sidx in _batch_slice_ids.unique():
+-                sidx_i = sidx.item()
+-                slice_sample_counts_main[sidx_i] += (
+-                    _batch_slice_ids == sidx_i
+-                ).sum().item()
+-
+-            # ① 에포크 내 첫 등장 배치 위치 기록
+-            for sidx in _batch_slice_ids.unique():
+-                sidx_i = sidx.item()
+-                slice_first_batch_pos_sum[sidx_i]   += _batch_in_epoch
+-                slice_first_batch_pos_count[sidx_i] += 1
+-
+-            # ③ 전반/후반 Loss 기여용 배치 위치 플래그
+-            _is_early_batch = (_batch_in_epoch < _current_epoch_half_size)
+-
+-            _batch_in_epoch += 1
+-        # ===== [ANALYSIS 끝] =====
+-
++        batch = dataset.get_batch(args.batch_size, args.device, sampling_probs=main_sampling_probs)
+         with torch.cuda.amp.autocast(fp16):
+             losses = model(**batch)
+ 
+@@ -365,7 +280,7 @@
+                         slice_residuals[~seen] = init_mean
+                     _residuals_initialized = True
+                     logging.info(
+-                        "[HSM] slice_residuals initialized from first batch. "
++                        "[E3] slice_residuals initialized from first batch. "
+                         "mean=%.6f, min=%.6f, max=%.6f",
+                         slice_residuals.mean().item(),
+                         slice_residuals.min().item(),
+@@ -379,30 +294,14 @@
+                         SLICE_RESIDUAL_EMA * slice_residuals[si.item()]
+                         + (1 - SLICE_RESIDUAL_EMA) * mean_mse
+                     )
+-                    # ② 슬라이스별 Loss 기여량 누적
+-                    si_i = si.item()
+-                    loss_pixels = pixel_mse_vals[mask].sum().item()
+-                    loss_n      = mask.sum().item()
+-                    slice_loss_sum[si_i]       += loss_pixels
+-                    slice_loss_count_arr[si_i] += loss_n
+-
+-                    # ③ 전반/후반 분리 누적
+-                    if _is_early_batch:
+-                        slice_loss_early_sum[si_i] += loss_pixels
+-                    else:
+-                        slice_loss_late_sum[si_i]  += loss_pixels
+             # ===== [Hard Slice Mining 끝] =====
+ 
+             # ===== [FF Loss 추가] 패치 배치 샘플링 및 patch_forward 호출 =====
+             if use_ff_loss:
+-                # ===== [Ablation] no_hard_mining=True면 FF 패치 샘플링도 균등으로 강제 =====
+-                if no_hard_mining:
+-                    sampling_probs = None
+-                elif i <= HARD_MINING_START_ITER or not _residuals_initialized:
++                if i <= HARD_MINING_WARMUP or not _residuals_initialized:
+                     sampling_probs = None
+                 else:
+                     sampling_probs = slice_residuals / slice_residuals.sum()
+-                # ===== [Ablation 끝] =====
+                 patch_batch = dataset.get_patch_batch(
+                     n_patches, patch_size, args.device,
+                     sampling_probs=sampling_probs,
+@@ -410,16 +309,7 @@
+                 if patch_batch:
+                     patch_losses = model.patch_forward(**patch_batch)
+                     losses.update(patch_losses)
+-                    # ===== [ANALYSIS] 패치 샘플링 카운트 =====
+-                    for sidx in patch_batch["slice_idx_patch"].cpu():
+-                        slice_sample_counts_patch[sidx.item()] += 1
+-                    # ===== [ANALYSIS 끝] =====
+             # ===== [FF Loss 추가 끝] =====
+-
+-            # ===== [ANALYSIS] 잔차 EMA 시계열 스냅샷 =====
+-            if _residuals_initialized and i in snapshot_iters:
+-                residuals_history.append((i, slice_residuals.clone().numpy()))
+-            # ===== [ANALYSIS 끝] =====
+ 
+             # ===== [G3/B] Diversity Loss 계산 =====
+             if use_diversity_loss:
+@@ -430,20 +320,30 @@
+                 )
+ 
+                 if diversity_loss_fn == "entropy":
++                    # [B] softmax 훈 엔트로피 기준
++                    # entropy 최대 = 균등 분포 (= 분화 없음) → 낮이는 방향이 의도
++                    # relu(entropy - target): entropy > target 일 때만 패널티 부과
+                     _p = F.softmax(_level_weights_param, dim=0)
+                     _entropy = -(_p * (_p + 1e-8).log()).sum()
+                     losses[DIVERSITY_LOSS] = torch.relu(_entropy - _target)
+ 
+                 elif diversity_loss_fn == "gini":
++                    # [B] softmax 훈 Gini 비순수 기준
++                    # gini 최대 = 균등 분포 (= 분화 없음) → 낮이는 방향이 의도
++                    # relu(gini - target): gini > target 일 때만 패널티 부과
+                     _p = F.softmax(_level_weights_param, dim=0)
+                     _gini = 1.0 - (_p ** 2).sum()
+                     losses[DIVERSITY_LOSS] = torch.relu(_gini - _target)
+ 
+                 else:
++                    # [G3/G5_lowvar] variance 기준 (default, G5_lowvar 호환)
++                    # variance 높을수록 분화 우수 → 높이는 방향이 의도
++                    # relu(target - var): var < target 일 때만 패널티 부과
+                     if diversity_loss_space == "softmax":
+                         _w = F.softmax(_level_weights_param, dim=0) * model.inr.n_levels
+                         _var = torch.var(_w)
+                     else:
++                        # raw logit 기준 (G3_softvar 기본)
+                         _var = torch.var(_level_weights_param)
+                     losses[DIVERSITY_LOSS] = torch.relu(_target - _var)
+             # ===== [G3/B 끝] =====
+@@ -503,65 +403,6 @@
+                 if i == args.n_iter:
+                     logging.debug("Final scale of GradScaler = %f" % current_scaler)
+ 
+-    # ===== [ANALYSIS] 슬라이스 분석 데이터 저장 =====
+-    import os
+-    import numpy as np
+-
+-    _output_vol_path = getattr(args, "output_volume", None)
+-    if _output_vol_path is not None:
+-        _vol_stem = os.path.basename(_output_vol_path)
+-        for _ext in (".nii.gz", ".nii"):
+-            if _vol_stem.endswith(_ext):
+-                _vol_stem = _vol_stem[: -len(_ext)]
+-                break
+-        _analysis_dir = os.path.join(
+-            os.path.dirname(_output_vol_path),
+-            f"{_vol_stem}_slice_analysis",
+-        )
+-    else:
+-        _analysis_dir = os.path.join(".", "slice_analysis")
+-
+-    os.makedirs(_analysis_dir, exist_ok=True)
+-
+-    np.save(os.path.join(_analysis_dir, "slice_residuals_final.npy"),      slice_residuals.numpy())
+-    np.save(os.path.join(_analysis_dir, "slice_sample_counts_main.npy"),   slice_sample_counts_main.numpy())
+-    np.save(os.path.join(_analysis_dir, "slice_sample_counts_patch.npy"),  slice_sample_counts_patch.numpy())
+-    np.save(os.path.join(_analysis_dir, "slice_pixel_counts.npy"),         dataset._slice_pixel_counts.numpy())
+-    if residuals_history:
+-        iters_arr     = np.array([r[0] for r in residuals_history], dtype=np.int32)
+-        residuals_arr = np.stack([r[1] for r in residuals_history], axis=0)
+-        np.save(os.path.join(_analysis_dir, "residuals_history_iters.npy"),  iters_arr)
+-        np.save(os.path.join(_analysis_dir, "residuals_history_values.npy"), residuals_arr)
+-
+-    # ① 에포크 내 평균 첫 등장 배치 위치
+-    avg_first_batch_pos = np.where(
+-        slice_first_batch_pos_count.numpy() > 0,
+-        slice_first_batch_pos_sum.numpy() / np.maximum(slice_first_batch_pos_count.numpy(), 1),
+-        0.0,
+-    )
+-    np.save(os.path.join(_analysis_dir, "slice_avg_first_batch_pos.npy"), avg_first_batch_pos)
+-
+-    # ② 슬라이스별 평균 Loss 기여량
+-    avg_loss_per_pixel = np.where(
+-        slice_loss_count_arr.numpy() > 0,
+-        slice_loss_sum.numpy() / np.maximum(slice_loss_count_arr.numpy(), 1),
+-        0.0,
+-    )
+-    np.save(os.path.join(_analysis_dir, "slice_avg_loss_per_pixel.npy"), avg_loss_per_pixel)
+-
+-    # ③ 전반/후반 Loss 기여
+-    np.save(os.path.join(_analysis_dir, "slice_loss_early_sum.npy"), slice_loss_early_sum.numpy())
+-    np.save(os.path.join(_analysis_dir, "slice_loss_late_sum.npy"),  slice_loss_late_sum.numpy())    
+-
+-    logging.info(
+-        "[ANALYSIS] Slice analysis data saved to %s "
+-        "(residuals_final, sample_counts_main, sample_counts_patch, "
+-        "pixel_counts, residuals_history)",
+-        _analysis_dir,
+-    )
+-    # ===== [ANALYSIS 끝] =====
+-
+-
+     # outputs
+     transformation = model.transformation
+     ax = transformation.axisangle()
+
+
+===== data.py =====
+--- /dshome/ddualab/dongnyeok/NeSVoR/nesvor/inr/data.py
++++ /dshome/ddualab/dongnyeok/NeSVoR_alt_IC/nesvor/inr/data.py
+@@ -106,7 +106,6 @@
+         batch_size: int,
+         device,
+         sampling_probs: Optional[torch.Tensor] = None,
+-        hsm_beta=1.0
+     ) -> Dict[str, torch.Tensor]:
+         """메인 MSE 학습용 픽셀 배치 반환.
+ 
+@@ -129,32 +128,24 @@
+                 # ===== [HM2] 가중 샘플링: 슬라이스 잔차에 비례해 픽셀을 재정렬 =====
+                 # 1) 슬라이스별 픽셀 가중치 = sampling_probs * n_pixels_in_slice
+                 #    (슬라이스를 더 자주 보이되, 각 슬라이스 내부는 균등하게 커버)
+-                uniform_w = self._slice_pixel_counts / self._slice_pixel_counts.sum()
+-                hsm_w     = sampling_probs * self._slice_pixel_counts
+-                hsm_w     = hsm_w / hsm_w.sum()
+-                pixel_weights = (1 - hsm_beta) * uniform_w + hsm_beta * hsm_w
++                pixel_weights = sampling_probs * self._slice_pixel_counts
++                pixel_weights = pixel_weights / pixel_weights.sum()
+ 
+                 # 2) 슬라이스별 인덱스 블록을 가중치에 따라 multinomial 재정렬
+                 #    전체 픽셀 수만큼 replacement=True로 샘플링 후 사용
+                 #    (replacement=False는 수백만 원소에 느리므로 대신
+                 #     슬라이스 단위 셔플 + 내부 randperm 조합 사용)
+                 n_total = self.xyz.shape[0]
+-                # 슬라이스별 할당 픽셀 수 계산
+-                target_counts = (pixel_weights * n_total).round().long()
+-                # 반올림 오차 보정: 차이를 가중치가 가장 높은 슬라이스에 몰아줌
+-                diff = int(n_total - target_counts.sum().item())
+-                target_counts[int(pixel_weights.argmax().item())] += diff
++                slice_order = torch.multinomial(
++                    pixel_weights, self.n_slices, replacement=False
++                )  # (n_slices,) 슬라이스 방문 순서
+ 
+                 parts = []
+-                for s in range(self.n_slices):
++                for s in slice_order.tolist():
+                     start, end = self._slice_pixel_ranges[s]
+-                    n_sample = int(target_counts[s].item())
+-                    if n_sample <= 0:
+-                        continue
+-                    # replacement=True: 잔차 높은 슬라이스는 n_sample > n_available 가능
+-                    perm = torch.randint(start, end, (n_sample,), device=device)
++                    perm = torch.randperm(end - start, device=device) + start
+                     parts.append(perm)
+-                idx = torch.cat(parts)  # 길이 = n_total
++                idx = torch.cat(parts)  # 길이 = n_total (모든 픽셀 한 번씩)
+                 # ===== [HM2 끝] =====
+ 
+             self.xyz = self.xyz[idx]
+

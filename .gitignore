@@ -6,6 +6,23 @@ checkpoints/
 *.nii.gz
 /docker/NeSVoR/
 
+# ML Models & Weights (필수 추가)
+*.pt
+*.pth
+*.bin
+*.onnx
+*.safetensors
+*.ckpt
+
+# Datasets & Data Files (필수 추가)
+*.csv
+*.tsv
+*.parquet
+*.pkl
+
+# Shell scripts logging/outputs (선택 추가: 실행 로그 등)
+*.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

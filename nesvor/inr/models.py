@@ -815,7 +815,7 @@ class NeSVoR(nn.Module):
         PP = xyz_patch.shape[1]
         P = int(PP ** 0.5)
 
-        xyz_flat = xyz_patch.view(n * PP, 3)
+        xyz_flat = xyz_patch.view(n * PP, 3) / self.spatial_scaling
         slice_idx_flat = slice_idx_patch.repeat_interleave(PP)
 
         n_samples = self.args.n_samples
