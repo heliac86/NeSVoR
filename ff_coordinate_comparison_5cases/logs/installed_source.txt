@@ -1,5 +1,0 @@
-Training Python: /dshome/ddualab/conda_env/nesvor/bin/python
-Installed models: /dshome/ddualab/dongnyeok/NeSVoR_alt_IC/nesvor/inr/models.py
-Coordinate scaling fix: present
-models.py SHA256: 68aa5a0f6aeead5136dbf5c5b1c02aa2b08480b0e5b3013baaf10c61f71716f7
-These are test subjects: compare fixed settings; do not tune on their results.

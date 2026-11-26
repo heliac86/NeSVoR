@@ -152,3 +152,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Keep the published com2 tree source-only.
+/*
+!/.gitignore
+!/LICENSE
+!/nesvor/
