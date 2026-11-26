@@ -1,6 +1,7 @@
 from typing import List, Union, Optional
 import os
 import torch
+from torch.nn.utils import parametrize
 from ..transform import transform_points, RigidTransform
 from ..image import Slice, Volume, load_volume, load_mask
 from .models import INR
@@ -65,7 +66,7 @@ def sample_points(
     shape = xyz.shape[:-1]
     xyz = xyz.view(-1, 3)
     v = torch.empty(xyz.shape[0], dtype=torch.float32, device=xyz.device)
-    with torch.no_grad():
+    with torch.no_grad(), parametrize.cached():
         for i in range(0, xyz.shape[0], batch_size):
             xyz_batch = xyz[i : i + batch_size]
             xyz_batch = model.sample_batch(
@@ -123,7 +124,7 @@ def sample_slices(
     n_samples: int = 128,
 ) -> List[Slice]:
     model.eval()
-    with torch.no_grad():
+    with torch.no_grad(), parametrize.cached():
         slices_sampled = []
         for i, slice in enumerate(slices):
             slices_sampled.append(

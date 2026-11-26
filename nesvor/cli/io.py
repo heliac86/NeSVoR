@@ -59,11 +59,7 @@ def inputs(args: Namespace) -> Tuple[Dict, Namespace]:
         input_dict["input_slices"] = input_slices
     if getattr(args, "input_model", None) is not None:
         logging.info("loading model")
-        cp = torch.load(args.input_model, map_location=args.device)
-        input_dict["model"] = INR(cp["model"]["bounding_box"], cp["args"])
-        input_dict["model"].load_state_dict(cp["model"])
-        input_dict["mask"] = cp["mask"]
-        args = merge_args(cp["args"], args)
+        input_dict["model"], input_dict["mask"], args = load_model(args)
     return input_dict, args
 
 
@@ -78,6 +74,7 @@ def outputs(data: Dict, args: Namespace) -> None:
         torch.save(
             {
                 "model": data["output_model"].state_dict(),
+                "grid_resolution": data["output_model"].grid_resolution,
                 "mask": data["mask"],
                 "args": args,
             },
@@ -100,7 +97,11 @@ def outputs(data: Dict, args: Namespace) -> None:
 
 def load_model(args: Namespace) -> Tuple[INR, Volume, Namespace]:
     cp = torch.load(args.input_model, map_location=args.device)
-    inr = INR(cp["model"]["bounding_box"], cp["args"])
+    inr = INR(
+        cp["model"]["bounding_box"],
+        cp["args"],
+        grid_resolution=cp.get("grid_resolution"),
+    ).to(args.device)
     inr.load_state_dict(cp["model"])
     mask = cp["mask"]
     args = merge_args(cp["args"], args)

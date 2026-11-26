@@ -5,6 +5,7 @@ import datetime
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.nn.utils import parametrize
 import logging
 from ..utils import MovingAverage, log_params, TrainLogger
 # ===== [FF Loss 추가] 모델 임포트에 FF_LOSS 키 추가 =====
@@ -47,6 +48,15 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
         (bb - center) / spatial_scaling,
         spatial_scaling,
         args,
+    )
+    inr_parameters = sum(p.numel() for p in model.inr.parameters() if p.requires_grad)
+    volume_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info(
+        "Trainable scalars: saved INR=%d, training-only=%d, total=%d, slices=%d",
+        inr_parameters,
+        volume_parameters - inr_parameters,
+        volume_parameters,
+        dataset.n_slices,
     )
 
     # ===== [k_norm] 훈련 타겟 정규화 =====
@@ -262,7 +272,7 @@ def train(slices: List[Slice], args: Namespace) -> Tuple[INR, List[Slice], Volum
 
         # forward
         batch = dataset.get_batch(args.batch_size, args.device, sampling_probs=main_sampling_probs)
-        with torch.cuda.amp.autocast(fp16):
+        with torch.cuda.amp.autocast(fp16), parametrize.cached():
             losses = model(**batch)
 
             # ===== [Hard Slice Mining] SLICE_MSE_KEY 관리 =====

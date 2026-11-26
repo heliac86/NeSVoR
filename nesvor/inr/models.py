@@ -5,6 +5,7 @@ import logging
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+from torch.nn.utils.parametrize import register_parametrization
 from .hash_grid_torch import HashEmbedder
 from ..transform import RigidTransform, ax_transform_points, mat_transform_points
 from ..utils import resolution2sigma
@@ -53,6 +54,97 @@ def build_encoding(**config):
                 )
             raise e
     return encoding
+
+
+class ShareHashGridEntries(nn.Module):
+    """Reconstruct the logical table from independent feature vectors."""
+
+    def __init__(
+        self, n_features: int, levels: Tuple[Tuple[int, int], ...]
+    ) -> None:
+        super().__init__()
+        self.n_features = n_features
+        self.full_sizes = tuple(size for size, _ in levels)
+        self.independent_sizes = tuple(size - shared for size, shared in levels)
+        self.shared_sizes = tuple(shared for _, shared in levels)
+
+    def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        rows = weight.reshape(-1, self.n_features)
+        prefix_size = len(rows) - sum(self.independent_sizes)
+        prefix, *levels = rows.split((prefix_size, *self.independent_sizes))
+        parts = [prefix]
+        for level, shared in zip(levels, self.shared_sizes):
+            parts.append(level)
+            if shared:
+                # Mirror the preceding block within this level.
+                parts.append(level[-shared:].flip(0))
+        return torch.cat(parts, dim=0).reshape(-1, *weight.shape[1:])
+
+    def right_inverse(self, weight: torch.Tensor) -> torch.Tensor:
+        rows = weight.reshape(-1, self.n_features)
+        prefix_size = len(rows) - sum(self.full_sizes)
+        prefix, *levels = rows.split((prefix_size, *self.full_sizes))
+        kept = [level[:size] for level, size in zip(levels, self.independent_sizes)]
+        return torch.cat((prefix, *kept), dim=0).reshape(-1, *weight.shape[1:])
+
+
+def reduce_hash_grid_parameters(
+    encoding: nn.Module, requested: int, requested_levels: int, config: Dict[str, Any]
+) -> int:
+    features = config["n_features_per_level"]
+    level_count = config["n_levels"]
+    selected = min(requested_levels, level_count)
+    if isinstance(encoding, HashEmbedder):
+        entries = [embedding.num_embeddings for embedding in encoding.embeddings[-selected:]]
+    elif selected == 1:
+        # Preserve the single-level capacity limit used by com checkpoints.
+        resolution = config["base_resolution"] * (
+            config["per_level_scale"] ** (level_count - 1)
+        )
+        safe_resolution = max(1, int(resolution) - 1)
+        table_capacity = 1 << config["log2_hashmap_size"]
+        entries = [min(table_capacity, safe_resolution**3)]
+    else:
+        # Match tiny-cuda-nn's packed, 8-row aligned hash table layout.
+        base = config["base_resolution"]
+        log_scale = torch.tensor(config["per_level_scale"], dtype=torch.float32, device="cpu").log2()
+        levels = torch.arange(level_count, dtype=torch.float32, device="cpu")
+        scale = (levels * log_scale).exp2() * base - 1
+        resolutions = (scale.ceil().to(torch.int64) + 1).tolist()
+        table_capacity = 1 << config["log2_hashmap_size"]
+        per_level = [min(table_capacity, ((r**3 + 7) // 8) * 8) for r in resolutions]
+        if sum(per_level) * features != encoding.params.numel():
+            raise ValueError(
+                "Calculated hash grid sizes do not match tiny-cuda-nn's packed parameters. "
+                "Check the backend version and grid configuration."
+            )
+        entries = per_level[-selected:]
+
+    limits = [size // 2 for size in entries]
+    budget = min(requested // features, sum(limits))
+    per_level, extra = divmod(budget, selected)
+    shared = [min(limit, per_level + (i < extra)) for i, limit in enumerate(limits)]
+    remaining = budget - sum(shared)
+    for i in reversed(range(selected)):
+        extra = min(remaining, limits[i] - shared[i])
+        shared[i] += extra
+        remaining -= extra
+
+    if isinstance(encoding, HashEmbedder):
+        for embedding, size, count in zip(encoding.embeddings[-selected:], entries, shared):
+            if count:
+                register_parametrization(
+                    embedding, "weight", ShareHashGridEntries(features, ((size, count),))
+                )
+    elif budget:
+        register_parametrization(
+            encoding, "params", ShareHashGridEntries(features, tuple(zip(entries, shared)))
+        )
+    logging.info(
+        "Hash-grid scalars removed by level (0-based): %s",
+        ", ".join(f"L{i}={count * features}" for i, count in enumerate(shared, level_count - selected)),
+    )
+    return budget * features
 
 
 def build_network(**config):
@@ -238,20 +330,28 @@ class GatingMLP(nn.Module):
 
 class INR(nn.Module):
     def __init__(
-        self, bounding_box: torch.Tensor, args: Namespace, spatial_scaling: float = 1.0
+        self,
+        bounding_box: torch.Tensor,
+        args: Namespace,
+        spatial_scaling: float = 1.0,
+        *,
+        grid_resolution: Optional[Tuple[int, int]] = None,
     ) -> None:
         super().__init__()
         if TYPE_CHECKING:
             self.bounding_box: torch.Tensor
         self.register_buffer("bounding_box", bounding_box)
         # hash grid encoding
-        base_resolution, n_levels = compute_resolution_nlevel(
-            self.bounding_box,
-            args.coarsest_resolution,
-            args.finest_resolution,
-            args.level_scale,
-            spatial_scaling,
-        )
+        if grid_resolution is None:
+            grid_resolution = compute_resolution_nlevel(
+                self.bounding_box,
+                args.coarsest_resolution,
+                args.finest_resolution,
+                args.level_scale,
+                spatial_scaling,
+            )
+        base_resolution, n_levels = grid_resolution
+        self.grid_resolution = grid_resolution
 
         self.n_levels = n_levels
         self.n_features_per_level = args.n_features_per_level
@@ -261,7 +361,7 @@ class INR(nn.Module):
         self.register_buffer("v_mean", torch.tensor(1.0, dtype=torch.float32))
         # ===== [k_norm 끝] =====
 
-        self.encoding = build_encoding(
+        encoding_config = dict(
             n_input_dims=3,
             otype="HashGrid",
             n_levels=n_levels,
@@ -271,6 +371,22 @@ class INR(nn.Module):
             per_level_scale=args.level_scale,
             dtype=args.dtype,
         )
+        requested_reduction = getattr(args, "hash_grid_parameter_reduction", 0)
+        if requested_reduction < 0:
+            raise ValueError("hash_grid_parameter_reduction must be nonnegative")
+        requested_levels = getattr(args, "hash_grid_reduction_levels", 1)
+        if requested_levels < 1:
+            raise ValueError("--hash-grid-reduction-levels must be at least 1")
+        self.encoding = build_encoding(**encoding_config)
+        if requested_reduction:
+            removed = reduce_hash_grid_parameters(
+                self.encoding, requested_reduction, requested_levels, encoding_config
+            )
+            logging.info(
+                "Hash-grid trainable scalars removed: %d (requested %d)",
+                removed,
+                requested_reduction,
+            )
         # density net
         self.density_net = build_network(
             n_input_dims=n_levels * args.n_features_per_level,
@@ -290,6 +406,12 @@ class INR(nn.Module):
         self.spatial_gating = (
             self.use_gating and getattr(args, "spatial_gating", False)
         )
+        self.fixed_gating_input = getattr(args, "fixed_gating_input", False)
+        if self.fixed_gating_input and not self.spatial_gating:
+            raise ValueError(
+                "--fixed-gating-input requires --spatial-gating "
+                "with --no-gating unset."
+            )
         # ===== [G6 끝] =====
 
         # ===== [G7] z_repr 기반 게이팅 여부 =====
@@ -425,6 +547,9 @@ class INR(nn.Module):
             else:
                 # [G6] 좌표만 사용
                 gating_input = x.float()  # (N_px, 3)
+
+            if self.fixed_gating_input:
+                gating_input = torch.full_like(gating_input, 0.5)
 
             logits = self.gating_net(gating_input)                 # (N_px, n_levels)
 

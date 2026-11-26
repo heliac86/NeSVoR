@@ -100,6 +100,7 @@ def setup_logger(filename: Optional[str], verbose: int) -> None:
     logging.basicConfig(
         handlers=handlers,
         level=level,
+        force=True,
     )
 
     def log_except_hook(*exc_info):

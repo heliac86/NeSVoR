@@ -26,6 +26,12 @@ def build_parser_training() -> argparse.ArgumentParser:
         help="Max log2 size of the hash grid per level.",
     )
     parser.add_argument(
+        "--hash-grid-reduction-levels",
+        default=4,
+        type=int,
+        help="Number of finest levels across which to share hash-grid entries (default: 4).",
+    )
+    parser.add_argument(
         "--level-scale",
         default=1.3819,
         type=float,
@@ -128,6 +134,14 @@ def build_parser_training() -> argparse.ArgumentParser:
             "to emphasize different frequency levels independently. "
             "Requires --no-gating to be unset. "
             "See also --gating-hidden-dim."
+        ),
+    )
+    parser.add_argument(
+        "--fixed-gating-input",
+        action="store_true",
+        help=(
+            "Feed the same constant input to the gating MLP at all locations. "
+            "Requires --spatial-gating."
         ),
     )
     parser.add_argument(
@@ -1137,6 +1151,8 @@ def build_command_reconstruct(
             build_parser_common(),
         ],
     )
+    # Record the default in new checkpoints without changing older INR loads.
+    update_defaults(parser_reconstruct, hash_grid_parameter_reduction=100_000)
     return parser_reconstruct
 
 
